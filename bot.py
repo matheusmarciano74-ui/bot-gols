@@ -186,8 +186,8 @@ def get_pregame_candidates():
             continue
 
         league = f["league"]["name"]
-        if league not in TARGET_LEAGUES:
-            continue
+       # if league not in TARGET_LEAGUES:
+       #     continue
 
         mins = mins_to_kickoff(f["fixture"]["date"])
         if mins < PRE_MIN or mins > PRE_MAX:
