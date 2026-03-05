@@ -13,8 +13,8 @@ API = "https://v3.football.api-sports.io"
 POLL_SECONDS = 120  # 2 min
 
 # PRÉ-JOGO: janela pra alertar
-PRE_MIN = 15
-PRE_MAX = 55
+PRE_MIN = 5
+PRE_MAX = 120
 
 ODD_MIN_HT = 1.30
 ALERTS_PER_HOUR = 5
