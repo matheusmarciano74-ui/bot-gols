@@ -95,8 +95,8 @@ def mins_to_kickoff(iso_dt):
 # ----------------------------
 
 def get_today_fixtures():
-    today = date.today().isoformat()
-    return api("/fixtures", {"date": today, "timezone": "America/Sao_Paulo"})
+    # pega os próximos jogos (bem mais confiável que "date=hoje")
+    return api("/fixtures", {"next": 100, "timezone": "America/Sao_Paulo"})
 
 def get_last_fixtures(team_id, last=10):
     return api("/fixtures", {"team": team_id, "last": last, "timezone": "America/Sao_Paulo"})
