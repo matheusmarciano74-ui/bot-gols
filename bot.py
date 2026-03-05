@@ -1,20 +1,24 @@
 # bot.py
 # Bot Gols HT/FT (modo FREE) - API-Football (API-Sports) + Telegram
 #
-# ✅ Ajustado para evitar o endpoint /fixtures?live=all (que costuma dar 403 no plano free)
-# ✅ Usa /fixtures?date=YYYY-MM-DD e filtra jogos LIVE
-# ✅ Economiza requests (plano FREE: ~100/dia) com:
+# ✅ Ajustado para evitar /fixtures?live=all (pode dar 403 no free)
+# ✅ Usa /fixtures?date=YYYY-MM-DD e filtra jogos LIVE (1H/HT/2H)
+# ✅ Economiza requests (plano FREE ~100/dia) com:
 #    - polling mais lento
 #    - checar estatísticas só de poucos jogos candidatos
 #    - cache de stats por alguns minutos
+#
+# Comandos no Telegram:
+#   status  -> mostra resumo do que está sendo escaneado
+#   agora   -> força checagem imediata
 #
 # Variáveis de ambiente (Railway -> Variables):
 #   API_FOOTBALL_KEY   = sua chave da API-Football
 #   TELEGRAM_TOKEN     = token do bot do Telegram
 #   TELEGRAM_CHAT_ID   = id numérico do seu chat
 #
-# Dependência:
-#   requests  (requirements.txt já deve ter "requests")
+# requirements.txt:
+#   requests
 
 import os
 import time
@@ -44,18 +48,17 @@ TARGET_LEAGUE_KEYWORDS = [
 ]
 
 # Seu filtro de “pressão” (ajustável)
-MIN_TRIGGER = 25
-SHOTS_MIN   = 8
-SOT_MIN     = 2
-CORNERS_MIN = 3
-AVOID_RED   = True
+MIN_TRIGGER = int(os.getenv("MIN_TRIGGER", "25"))  # minuto mínimo no 1º tempo
+SHOTS_MIN   = int(os.getenv("SHOTS_MIN", "8"))
+SOT_MIN     = int(os.getenv("SOT_MIN", "2"))
+CORNERS_MIN = int(os.getenv("CORNERS_MIN", "3"))
+AVOID_RED   = os.getenv("AVOID_RED", "1").strip() != "0"
 
 # Controle: não operar em mais de 3 jogos ao mesmo tempo
-MAX_ACTIVE_GAMES = 3
+MAX_ACTIVE_GAMES = int(os.getenv("MAX_ACTIVE_GAMES", "3"))
 
-# IMPORTANTÍSSIMO p/ plano FREE (100 req/dia):
-# Sugestão segura:
-# - fixtures a cada 15 min = ~96/dia (ok)
+# Polling do loop principal (p/ plano FREE 100/dia):
+# - 15 min = 96 chamadas/dia só de fixtures (OK)
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "900"))  # padrão 15 min
 
 # Quantos jogos no máximo vamos buscar stats por ciclo (cada stats = 1 request)
@@ -64,17 +67,22 @@ MAX_STATS_CHECK_PER_CYCLE = int(os.getenv("MAX_STATS_CHECK_PER_CYCLE", "2"))  # 
 # Cache de estatísticas (para não consultar toda hora o mesmo jogo)
 STATS_CACHE_TTL_SECONDS = int(os.getenv("STATS_CACHE_TTL_SECONDS", "480"))  # 8 min
 
-ALERT_HT = True
-ALERT_FT_AT_HT = True
+ALERT_HT = os.getenv("ALERT_HT", "1").strip() != "0"
+ALERT_FT_AT_HT = os.getenv("ALERT_FT_AT_HT", "1").strip() != "0"
 
 # =========================
 # STAKE (opcional)
 # =========================
-ODD_BASE = 1.30
-UNIT = 15.0
+ODD_BASE = float(os.getenv("ODD_BASE", "1.30"))
+UNIT = float(os.getenv("UNIT", "15"))
 
 def stake_for_op(op: int) -> float:
-    # Modelo simples: Op1=U, Op2=4U, Op3/4 zera prejuízo
+    """
+    Modelo simples:
+      Op1 = 1U
+      Op2 = 4U
+      Op3/Op4 = zera prejuízo acumulado usando odd_base
+    """
     if op == 1:
         return round(UNIT, 2)
     if op == 2:
@@ -99,9 +107,57 @@ def tg_send(text: str):
     try:
         r = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=20)
         if r.status_code != 200:
-            print("Telegram HTTP", r.status_code, r.text[:200], flush=True)
+            print("Telegram HTTP", r.status_code, r.text[:250], flush=True)
     except Exception as e:
         print("Telegram error:", e, flush=True)
+
+def tg_get_updates(offset=None):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+    params = {"timeout": 5}
+    if offset is not None:
+        params["offset"] = offset
+    r = requests.get(url, params=params, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+def normalize_cmd(text: str) -> str:
+    return (text or "").strip().lower()
+
+def handle_commands(state):
+    """
+    state: dict com chaves:
+      - last_update_id
+      - last_summary
+      - force_run
+    """
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        offset = (state.get("last_update_id", 0) + 1) if state.get("last_update_id") is not None else None
+        data = tg_get_updates(offset=offset)
+
+        for upd in data.get("result", []):
+            state["last_update_id"] = upd.get("update_id", state.get("last_update_id"))
+
+            msg = upd.get("message") or {}
+            chat = msg.get("chat") or {}
+            chat_id = str(chat.get("id", ""))
+
+            # só responde no seu chat
+            if chat_id != str(TELEGRAM_CHAT_ID):
+                continue
+
+            txt = normalize_cmd(msg.get("text", ""))
+
+            if txt in ("status", "/status"):
+                last = state.get("last_summary") or "Ainda não tenho resumo (aguarde 1 ciclo)."
+                tg_send("📡 STATUS:\n" + last)
+
+            elif txt in ("agora", "/agora", "run", "/run"):
+                state["force_run"] = True
+                tg_send("✅ Ok! Vou checar agora.")
+    except Exception as e:
+        print("Erro lendo comandos:", e, flush=True)
 
 # =========================
 # API HELPERS
@@ -185,16 +241,25 @@ def parse_stats(stats_response):
     red = get_stat(stats_response, 0, "Red Cards") + get_stat(stats_response, 1, "Red Cards")
     return {"shots": shots, "sot": sot, "corners": corners, "red": red}
 
+# =========================
+# MAIN
+# =========================
 def main():
     if not API_FOOTBALL_KEY:
         print("ERRO: API_FOOTBALL_KEY não configurada.", flush=True)
+        tg_send("⚠️ ERRO: API_FOOTBALL_KEY não configurada no Railway.")
         return
 
     print("Bot iniciado ✅ (modo FREE)", flush=True)
     tg_send("✅ Bot Gols HT/FT ONLINE (modo FREE). Vou alertar 0-0 com pressão (Over 0,5 HT) e no intervalo 0-0 (Over 0,5 FT).")
 
+    state = {"last_update_id": None, "last_summary": None, "force_run": False}
+
     while True:
         try:
+            # comandos do Telegram (status/agora)
+            handle_commands(state)
+
             fixtures = fetch_fixtures_today()
 
             # filtra só os jogos LIVE
@@ -217,12 +282,24 @@ def main():
                 sh = status_short(fx)
                 candidates.append((fx, m, sh, league_name))
 
+            # prioriza jogos mais avançados
             candidates.sort(key=lambda x: x[1], reverse=True)
 
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] LIVE={len(live)} | cand={len(candidates)} | active={len(ACTIVE_GAMES)}", flush=True)
+            # salva resumo para o comando "status"
+            top5 = candidates[:5]
+            lines = [f"LIVE={len(live)} | 0-0 alvo={len(candidates)} | ativos={len(ACTIVE_GAMES)}"]
+            for fx, m, sh, league_name in top5:
+                home = fx["teams"]["home"]["name"]
+                away = fx["teams"]["away"]["name"]
+                lines.append(f"- {m:02d}' {sh} | {league_name} | {home} x {away}")
+            state["last_summary"] = "\n".join(lines)
+
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] " + state["last_summary"].replace("\n", " | "), flush=True)
 
             rows_for_csv = []
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # limite de checagem de stats p/ economizar requests
             checked = 0
 
             for fx, m, sh, league_name in candidates:
@@ -231,14 +308,15 @@ def main():
                 away = fx["teams"]["away"]["name"]
                 jogo = f"{home} x {away}"
 
+                # Monta linha do CSV mesmo sem stats (pra debug/painel)
                 ht_flag = "SIM" if sh == "HT" else "NÃO"
                 rows_for_csv.append([jogo, m, "0-0", ht_flag, "", "", "", "", "", "", "", "", now_str])
 
-                # Limite de jogos ativos
+                # Respeita limite de jogos ativos
                 if fixture_id not in ACTIVE_GAMES and len(ACTIVE_GAMES) >= MAX_ACTIVE_GAMES:
                     continue
 
-                # ALERTA FT no intervalo 0-0 (economiza: sem stats)
+                # ALERTA FT no intervalo 0-0 (sem stats, economiza)
                 if ALERT_FT_AT_HT and sh == "HT":
                     key = (fixture_id, "FT")
                     if key not in SENT_ALERTS:
@@ -254,10 +332,11 @@ def main():
                         SENT_ALERTS.add(key)
                     continue
 
-                # ALERTA HT exige stats
+                # ALERTA HT exige stats (pressão)
                 if not (ALERT_HT and sh == "1H" and m >= MIN_TRIGGER):
                     continue
 
+                # economiza: só checar stats de poucos jogos por ciclo
                 if checked >= MAX_STATS_CHECK_PER_CYCLE:
                     continue
 
@@ -312,7 +391,13 @@ def main():
             print("Erro no loop:", repr(e), flush=True)
             tg_send(f"⚠️ Erro no bot: {e}")
 
-        time.sleep(POLL_SECONDS)
+        # Se pediu "agora", dorme pouco e roda de novo.
+        # Senão, respeita POLL_SECONDS.
+        if state.get("force_run"):
+            state["force_run"] = False
+            time.sleep(3)
+        else:
+            time.sleep(POLL_SECONDS)
 
 if __name__ == "__main__":
     main()
