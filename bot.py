@@ -73,6 +73,14 @@ def api(path, params):
     headers = {"x-apisports-key": API_KEY}
     r = requests.get(API + path, headers=headers, params=params, timeout=25)
     j = r.json()
+
+    # Mostra erro real quando não vier response
+    if "errors" in j and j["errors"]:
+        tg_send(f"❌ API ERR {path}: {j['errors']}")
+    if j.get("response") is None:
+        tg_send(f"❌ API SEM RESPONSE {path}: {j}")
+        return []
+
     return j.get("response", [])
 
 def now_brt():
