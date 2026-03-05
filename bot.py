@@ -11,42 +11,59 @@ TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID")
 
 API = "https://v3.football.api-sports.io"
-TIMEZONE = "America/Sao_Paulo"
+TZ = "America/Sao_Paulo"
 
 # =========================
-# CONFIG (ajuste aqui)
+# ECONOMIA (100 req/dia)
 # =========================
-POLL_SECONDS = 600  # 10 min (economiza quota)
+POLL_SECONDS = 900  # 15 min (economiza MUITO)
+
+DAILY_LIMIT = 95          # trava antes de 100
+req_count = 0
+req_day = date.today().isoformat()
+
+def reset_counter_if_new_day():
+    global req_count, req_day
+    today = date.today().isoformat()
+    if today != req_day:
+        req_day = today
+        req_count = 0
+
+def can_call_api():
+    reset_counter_if_new_day()
+    return req_count < DAILY_LIMIT
+
+def inc_req():
+    global req_count
+    req_count += 1
+
+# =========================
+# CONFIG PRÉ-JOGO
+# =========================
 PRE_MIN = 5
 PRE_MAX = 120
-
-# MODO PRÉ-JOGO:
-# - False (recomendado no plano FREE): avisa "jogo bom pré" sem olhar odds (economiza MUITO)
-# - True  (melhor no plano PAGO): só avisa se achar odd >= ODD_MIN_HT
-USE_ODDS = False
 ODD_MIN_HT = 1.30
 
-# Limite de alertas pré-jogo por hora
-ALERTS_PER_HOUR = 5
+# Quantos jogos pré-jogo vamos tentar pegar odd por rodada (economia)
+MAX_ODDS_CHECK_PER_LOOP = 2
 
-# Quantos jogos pré-jogo avaliar por rodada (pra economizar chamadas)
-MAX_PREGAME_EVAL = 12
-
-# Ao vivo: quantos jogos checar stats por rodada
-MAX_LIVE_EVAL = 3
-
-# Thresholds ao vivo (seu bot original)
+# =========================
+# CONFIG AO VIVO
+# =========================
 LIVE_MINUTE_MIN = 25
+MAX_LIVE_STATS_PER_LOOP = 1  # economia
+
 LIVE_SHOTS_MIN = 8
 LIVE_SOT_MIN = 2
 LIVE_CORNERS_MIN = 3
 
-# HT score mínimo pra alertar pré-jogo
-PRE_SCORE_MIN = 75
-PRE_CANDIDATE_MIN = 70
+# =========================
+# ALERT LIMIT
+# =========================
+ALERTS_PER_HOUR = 5
 
 # =========================
-# LIGAS IMPORTANTES (NOMES)
+# LIGAS IMPORTANTES
 # =========================
 TARGET_LEAGUES = [
     # INGLATERRA
@@ -88,120 +105,70 @@ TARGET_LEAGUES = [
 ]
 
 # =========================
-# HELPERS
+# TELEGRAM
 # =========================
 def tg_send(msg: str):
     if not TG_TOKEN or not TG_CHAT:
-        print("Telegram vars missing (TELEGRAM_TOKEN / TELEGRAM_CHAT_ID).")
+        print("Telegram vars missing.")
         return
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     try:
-        requests.post(url, data={"chat_id": TG_CHAT, "text": msg}, timeout=20)
+        requests.post(url, data={"chat_id": TG_CHAT, "text": msg}, timeout=15)
     except Exception as e:
-        print("Telegram send error:", e)
+        print("Telegram error:", e)
 
+# =========================
+# API
+# =========================
 def api(path: str, params: dict):
+    # trava de quota local (pra não passar de 100/dia)
+    if not can_call_api():
+        return []
+
     if not API_KEY:
-        tg_send("❌ ERRO: API_FOOTBALL_KEY não está definida no Railway.")
+        tg_send("❌ ERRO: API_FOOTBALL_KEY não existe no Railway.")
         return []
 
     headers = {"x-apisports-key": API_KEY}
-    r = requests.get(API + path, headers=headers, params=params, timeout=25)
-    j = r.json()
+    r = requests.get(API + path, headers=headers, params=params, timeout=20)
+    inc_req()
 
-    # Loga erro real (muito útil no plano free)
+    j = r.json()
     if j.get("errors"):
         tg_send(f"❌ API ERR {path}: {j['errors']}")
         return []
 
     return j.get("response", []) or []
 
-def now_local():
-    return datetime.now()
-
 def mins_to_kickoff(iso_dt: str) -> int:
-    # Ex: "2026-03-05T19:00:00-03:00"
     try:
         ko = datetime.fromisoformat(iso_dt.replace("Z", "+00:00"))
     except Exception:
-        # fallback
         ko = datetime.strptime(iso_dt[:19], "%Y-%m-%dT%H:%M:%S")
-
-    diff = ko - now_local()
+    diff = ko - datetime.now()
     return int(diff.total_seconds() // 60)
 
 # =========================
-# PRE-GAME (FREE SAFE)
+# FIXTURES (1 ou 2 calls por rodada)
 # =========================
-def get_ns_fixtures_today_and_tomorrow():
-    # Plano free: sem "next"
-    today = date.today()
-    tomorrow = today + timedelta(days=1)
+def get_fixtures_today():
+    today = date.today().isoformat()
+    # SEM status aqui: uma chamada só já pega NS + live (economia)
+    return api("/fixtures", {"date": today, "timezone": TZ})
 
-    f1 = api("/fixtures", {"date": today.isoformat(), "timezone": TIMEZONE, "status": "NS"})
-    f2 = api("/fixtures", {"date": tomorrow.isoformat(), "timezone": TIMEZONE, "status": "NS"})
-    return (f1 or []) + (f2 or [])
+def get_fixtures_tomorrow():
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    return api("/fixtures", {"date": tomorrow, "timezone": TZ})
 
-def get_last_fixtures(team_id: int, last: int = 10):
-    return api("/fixtures", {"team": team_id, "last": last, "timezone": TIMEZONE})
-
-def calc_ht_stats(last_fixtures: list) -> dict:
-    total = 0
-    ht_with_goal = 0
-    ht_goals_sum = 0
-
-    for fx in last_fixtures:
-        ht = (fx.get("score", {}) or {}).get("halftime", {}) or {}
-        home_ht = ht.get("home") or 0
-        away_ht = ht.get("away") or 0
-        g = (home_ht or 0) + (away_ht or 0)
-
-        total += 1
-        ht_goals_sum += g
-        if g >= 1:
-            ht_with_goal += 1
-
-    if total == 0:
-        return {"rate": 0.0, "avg": 0.0}
-
-    return {
-        "rate": (ht_with_goal / total) * 100.0,  # %
-        "avg": ht_goals_sum / total              # média
-    }
-
-def score_pregame(a: dict, b: dict, mins: int) -> int:
-    s = 0
-
-    def pts(t):
-        p = 0
-        if t["rate"] >= 70: p += 15
-        if t["rate"] >= 80: p += 10
-        if t["avg"] >= 1.10: p += 5
-        return p  # max 30
-
-    # A) tendência HT (0-60)
-    s += pts(a)
-    s += pts(b)
-
-    # B) encaixe simples (0-25)
-    if a["avg"] >= 1.10 and b["avg"] >= 1.10:
-        s += 12
-    if a["rate"] >= 75 and b["rate"] >= 75:
-        s += 13
-
-    # C) timing (0-15)
-    if 25 <= mins <= 45:
-        s += 15
-    elif 15 <= mins <= 24:
-        s += 8
-    elif 46 <= mins <= 55:
-        s += 5
-
-    return min(100, int(round(s)))
-
+# =========================
+# ODDS (chama pouco e só 1x por jogo)
+# =========================
 def get_odd_over05_ht(fixture_id: int):
-    # Só use se USE_ODDS=True (plano pago recomendado)
     items = api("/odds", {"fixture": fixture_id})
+    if not items:
+        return None
+
+    # parser tolerante
     for it in items:
         for book in it.get("bookmakers", []) or []:
             for bet in book.get("bets", []) or []:
@@ -218,65 +185,11 @@ def get_odd_over05_ht(fixture_id: int):
                             pass
     return None
 
-def build_pregame_list():
-    fixtures = get_ns_fixtures_today_and_tomorrow()
-
-    pre = []
-    for f in fixtures:
-        league = f.get("league", {}).get("name", "")
-        if league not in TARGET_LEAGUES:
-            continue
-
-        mins = mins_to_kickoff(f["fixture"]["date"])
-        if mins < PRE_MIN or mins > PRE_MAX:
-            continue
-
-        pre.append((mins, f))
-
-    # primeiro os que começam mais cedo (pra você ter antecedência)
-    pre.sort(key=lambda x: x[0])
-    return pre
-
 # =========================
-# LIVE (seu bot original)
+# AO VIVO STATS
 # =========================
-def get_live_games():
-    today = date.today().isoformat()
-    data = api("/fixtures", {"date": today, "timezone": TIMEZONE})
-
-    live = []
-    for f in data:
-        status = f["fixture"]["status"]["short"]
-        if status not in ["1H", "2H", "HT"]:
-            continue
-
-        league = f["league"]["name"]
-        if league not in TARGET_LEAGUES:
-            continue
-
-        home = f["teams"]["home"]["name"]
-        away = f["teams"]["away"]["name"]
-
-        ghome = f["goals"]["home"] or 0
-        gaway = f["goals"]["away"] or 0
-
-        minute = f["fixture"]["status"]["elapsed"] or 0
-
-        live.append({
-            "id": f["fixture"]["id"],
-            "league": league,
-            "home": home,
-            "away": away,
-            "minute": minute,
-            "score": f"{ghome}-{gaway}",
-            "status": status
-        })
-
-    return live
-
 def get_stats(fid: int):
     stats = api("/fixtures/statistics", {"fixture": fid})
-
     shots = 0
     sot = 0
     corners = 0
@@ -293,168 +206,187 @@ def get_stats(fid: int):
     return shots, sot, corners
 
 # =========================
-# RATE LIMIT (alerts/hour)
+# LIMIT ALERTA POR HORA
 # =========================
-def cleanup_alert_times(alert_times):
+alert_times = []
+
+def cleanup_alert_times():
+    global alert_times
     now = datetime.now()
     one_hour_ago = now - timedelta(hours=1)
-    return [t for t in alert_times if t >= one_hour_ago]
+    alert_times = [t for t in alert_times if t >= one_hour_ago]
+
+def can_alert_now():
+    cleanup_alert_times()
+    return len(alert_times) < ALERTS_PER_HOUR
+
+def record_alert():
+    alert_times.append(datetime.now())
 
 # =========================
 # MAIN
 # =========================
 def main():
-    tg_send("✅ Bot gols iniciado (pré-jogo + ao vivo)")
+    tg_send("✅ Bot gols iniciado (modo ECONÔMICO 100 req/dia)")
 
-    alerted_pre = set()   # fixture_id
-    alerted_live = set()  # fixture_id
+    alerted_pre = set()       # jogos já alertados no pré
+    checked_odds = set()      # jogos que já consultou odds (pra não gastar 2x)
+    alerted_live = set()      # jogos já alertados ao vivo
 
-    alert_times = []
     last_heartbeat = 0
     last_scan_log = 0
 
-    # cache por rodada pra não chamar last fixtures repetido
-    team_cache = {}  # team_id -> {"rate":.., "avg":..}
-
     while True:
         try:
-            # HEARTBEAT a cada 10 min
-            if time.time() - last_heartbeat > 600:
-                alert_times = cleanup_alert_times(alert_times)
-                tg_send(
-                    f"✅ BOT ON | alertas(60m): {len(alert_times)}/{ALERTS_PER_HOUR} | "
-                    f"pré-jogo: {'ODDS' if USE_ODDS else 'SEM ODDS'} | ao vivo ativo"
-                )
+            reset_counter_if_new_day()
+
+            # Heartbeat a cada 30 min (pra não spammar)
+            if time.time() - last_heartbeat > 1800:
+                tg_send(f"✅ BOT ON | req hoje: {req_count}/{DAILY_LIMIT} | alertas(60m): {len(alert_times)}/{ALERTS_PER_HOUR}")
                 last_heartbeat = time.time()
 
-            # ==========
-            # PRÉ-JOGO
-            # ==========
-            pre = build_pregame_list()
+            # Se estourou nossa trava local, para de chamar API e só avisa
+            if not can_call_api():
+                tg_send(f"⛔ LIMITE LOCAL atingido | req hoje: {req_count}/{DAILY_LIMIT} | aguardando virar o dia")
+                time.sleep(1800)
+                continue
 
-            # log do scan a cada 20 min (pra não encher)
-            if time.time() - last_scan_log > 1200:
-                tg_send(f"🔎 SCAN PRÉ | janela (T-{PRE_MAX}→T-{PRE_MIN}): {len(pre)} jogos")
+            fixtures = get_fixtures_today()
+
+            # Se não vier nada e já for tarde, tenta amanhã (1 call extra)
+            if (not fixtures) and datetime.now().hour >= 18:
+                fixtures = get_fixtures_tomorrow()
+
+            # Log scan a cada 45 min
+            if time.time() - last_scan_log > 2700:
+                tg_send(f"🔎 SCAN | fixtures recebidos: {len(fixtures)} | req hoje: {req_count}/{DAILY_LIMIT}")
                 last_scan_log = time.time()
 
-            scored = []
-            team_cache.clear()
-
-            # limita quantos jogos vamos avaliar por rodada (economiza quota)
-            for mins, f in pre[:MAX_PREGAME_EVAL]:
-                fid = f["fixture"]["id"]
-                if fid in alerted_pre:
+            # -----------------------
+            # PRÉ-JOGO: pegar jogos NS na janela
+            # -----------------------
+            pre_list = []
+            for f in fixtures:
+                status = f["fixture"]["status"]["short"]  # NS, 1H, 2H...
+                if status != "NS":
                     continue
 
-                home = f["teams"]["home"]
-                away = f["teams"]["away"]
-                home_id = home["id"]
-                away_id = away["id"]
-
-                # (opcional) odds - só se plano pago e você quiser
-                odd_ht = None
-                if USE_ODDS:
-                    odd_ht = get_odd_over05_ht(fid)
-                    if odd_ht is None or odd_ht < ODD_MIN_HT:
-                        continue
-
-                # stats time A
-                if home_id not in team_cache:
-                    home_last = get_last_fixtures(home_id, 10)
-                    team_cache[home_id] = calc_ht_stats(home_last)
-
-                # stats time B
-                if away_id not in team_cache:
-                    away_last = get_last_fixtures(away_id, 10)
-                    team_cache[away_id] = calc_ht_stats(away_last)
-
-                hs = team_cache[home_id]
-                as_ = team_cache[away_id]
-
-                sc = score_pregame(hs, as_, mins)
-
-                # candidato
-                if sc >= PRE_CANDIDATE_MIN:
-                    scored.append((sc, mins, odd_ht, f, hs, as_))
-
-            # melhores primeiro
-            scored.sort(key=lambda x: (-x[0], x[1]))
-
-            # manda até 5 alertas/h
-            for sc, mins, odd_ht, f, hs, as_ in scored:
-                if sc < PRE_SCORE_MIN:
+                league = f["league"]["name"]
+                if league not in TARGET_LEAGUES:
                     continue
 
-                alert_times = cleanup_alert_times(alert_times)
-                if len(alert_times) >= ALERTS_PER_HOUR:
+                mins = mins_to_kickoff(f["fixture"]["date"])
+                if mins < PRE_MIN or mins > PRE_MAX:
+                    continue
+
+                pre_list.append((mins, f))
+
+            # ordena por quem começa primeiro (antecedência)
+            pre_list.sort(key=lambda x: x[0])
+
+            # Checar odds só em poucos jogos por rodada (economia)
+            odds_checked_now = 0
+            for mins, f in pre_list:
+                if odds_checked_now >= MAX_ODDS_CHECK_PER_LOOP:
                     break
 
                 fid = f["fixture"]["id"]
                 if fid in alerted_pre:
                     continue
 
+                # odds só 1x por jogo
+                if fid in checked_odds:
+                    continue
+
+                # se não dá pra alertar por hora, nem gasta odds
+                if not can_alert_now():
+                    break
+
+                odd = get_odd_over05_ht(fid)
+                checked_odds.add(fid)
+                odds_checked_now += 1
+
+                # se API/Plano não retornar odds, só pula
+                if odd is None:
+                    continue
+
+                if odd >= ODD_MIN_HT:
+                    league = f["league"]["name"]
+                    home = f["teams"]["home"]["name"]
+                    away = f["teams"]["away"]["name"]
+
+                    tg_send(
+                        "🚨 ALERTA PRÉ (0.5 HT)\n"
+                        f"🏆 {league}\n"
+                        f"{home} x {away}\n"
+                        f"⏳ Faltam {mins} min\n"
+                        f"🎲 Odd O0.5 HT: {odd:.2f} (mín {ODD_MIN_HT})\n"
+                        "✅ Ação: entrar no Over 0.5 HT antes do jogo começar"
+                    )
+                    alerted_pre.add(fid)
+                    record_alert()
+
+            # -----------------------
+            # AO VIVO: encontrar 0-0 depois dos 25'
+            # -----------------------
+            live_candidates = []
+            for f in fixtures:
+                status = f["fixture"]["status"]["short"]
+                if status not in ["1H", "2H", "HT"]:
+                    continue
+
                 league = f["league"]["name"]
-                home_name = f["teams"]["home"]["name"]
-                away_name = f["teams"]["away"]["name"]
-
-                msg = (
-                    "🚨 ALERTA PRÉ (0.5 HT)\n"
-                    f"🏆 {league}\n"
-                    f"{home_name} x {away_name}\n"
-                    f"⏳ Faltam {mins} min\n"
-                    f"📈 Score: {sc}/100\n"
-                    f"📌 HT%: {hs['rate']:.0f}% vs {as_['rate']:.0f}% | HT avg: {hs['avg']:.2f} vs {as_['avg']:.2f}\n"
-                )
-                if USE_ODDS:
-                    msg += f"🎲 Odd O0.5 HT: {odd_ht:.2f} (mín {ODD_MIN_HT})\n"
-
-                msg += "✅ Ação: procurar Over 0.5 HT antes do jogo começar"
-                tg_send(msg)
-
-                alerted_pre.add(fid)
-                alert_times.append(datetime.now())
-
-            # ==========
-            # AO VIVO
-            # ==========
-            games = get_live_games()
-
-            candidates = []
-            for g in games:
-                if g["score"] != "0-0":
+                if league not in TARGET_LEAGUES:
                     continue
-                if g["minute"] < LIVE_MINUTE_MIN:
-                    continue
-                candidates.append(g)
 
-            # checa só alguns por rodada (economiza quota)
-            for g in candidates[:MAX_LIVE_EVAL]:
+                ghome = f["goals"]["home"] or 0
+                gaway = f["goals"]["away"] or 0
+                minute = f["fixture"]["status"]["elapsed"] or 0
+
+                if (ghome + gaway) != 0:
+                    continue
+                if minute < LIVE_MINUTE_MIN:
+                    continue
+
+                live_candidates.append({
+                    "id": f["fixture"]["id"],
+                    "league": league,
+                    "home": f["teams"]["home"]["name"],
+                    "away": f["teams"]["away"]["name"],
+                    "minute": minute
+                })
+
+            # checar stats em no máximo 1 jogo por rodada (economia)
+            checked_live = 0
+            for g in live_candidates:
+                if checked_live >= MAX_LIVE_STATS_PER_LOOP:
+                    break
+
                 fid = g["id"]
                 if fid in alerted_live:
                     continue
 
                 shots, sot, corners = get_stats(fid)
+                checked_live += 1
 
                 if shots >= LIVE_SHOTS_MIN and sot >= LIVE_SOT_MIN and corners >= LIVE_CORNERS_MIN:
-                    msg = (
+                    tg_send(
                         "⚽ POSSÍVEL GOL (AO VIVO)\n\n"
                         f"🏆 {g['league']}\n"
-                        f"{g['home']} x {g['away']}\n\n"
+                        f"{g['home']} x {g['away']}\n"
                         f"⏱ {g['minute']}' | 0-0\n\n"
                         f"📊 Chutes {shots}\n"
                         f"🎯 No alvo {sot}\n"
                         f"🚩 Escanteios {corners}\n\n"
                         "➡ Sinal de jogo quente (bom pra sua entrada 0.5 no intervalo/2ºT)"
                     )
-                    tg_send(msg)
                     alerted_live.add(fid)
 
             time.sleep(POLL_SECONDS)
 
         except Exception as e:
-            print("ERR:", e)
             tg_send(f"❌ Erro bot: {e}")
-            time.sleep(60)
+            time.sleep(300)
 
 if __name__ == "__main__":
     main()
