@@ -178,6 +178,8 @@ def get_odd_over05_ht(fixture_id):
 
 def get_pregame_candidates():
     fixtures = get_today_fixtures()
+
+    tg_send(f"DEBUG fixtures recebidos: {len(fixtures)}")
     out = []
 
     for f in fixtures:
