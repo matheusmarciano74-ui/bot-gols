@@ -87,7 +87,7 @@ def league_ok(league_name: str):
     if not league_name:
         return False
 
-    name = league_name.lower().strip()
+    name = league_name.lower()
 
     allowed = [
         "english premier league",
@@ -95,9 +95,9 @@ def league_ok(league_name: str):
         "uefa champions league",
         "uefa europa league",
         "uefa europa conference league",
-        "bundesliga",
-        "ligue 1",
-        "serie a (italy)",
+        "germany bundesliga",
+        "italy serie a",
+        "france ligue 1",
         "coppa italia",
         "fa cup",
         "efl cup",
@@ -108,34 +108,12 @@ def league_ok(league_name: str):
         "conmebol sudamericana",
         "liga profesional argentina",
         "copa argentina",
-        "brasileirao",
-        "serie a brazil",
-        "serie a (brazil)"
+        "brazil serie a",
+        "brasileirao"
     ]
 
-    blocked = [
-        "uganda",
-        "rwanda",
-        "singapore",
-        "malta"
-    ]
-
-    for bad in blocked:
-        if bad in name:
-            return False
-
-    for item in allowed:
-        if item in name:
-            return True
-
-    return False
-
-    for bad in BLOCKED_WORDS:
-        if bad in name:
-            return False
-
-    for item in TARGET_LEAGUES:
-        if item.lower() in name:
+    for league in allowed:
+        if league in name:
             return True
 
     return False
