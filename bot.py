@@ -84,7 +84,36 @@ def minutes_to_event(dt_str: str):
     return int(diff.total_seconds() // 60)
 
 def league_ok(league_name: str):
-    name = (league_name or "").lower()
+    if not league_name:
+        return False
+
+    name = league_name.lower()
+
+    allowed = [
+        "premier league",
+        "champions league",
+        "europa league",
+        "conference league",
+        "bundesliga",
+        "ligue 1",
+        "serie a",
+        "coppa italia",
+        "fa cup",
+        "efl cup",
+        "coupe de france",
+        "dfb pokal",
+        "copa do brasil",
+        "libertadores",
+        "sudamericana",
+        "argentina",
+        "brasileirao"
+    ]
+
+    for league in allowed:
+        if league in name:
+            return True
+
+    return False
 
     for bad in BLOCKED_WORDS:
         if bad in name:
