@@ -12,19 +12,16 @@ BASE_URL = "https://api.odds-api.io/v3"
 # =========================
 # CONFIG
 # =========================
-POLL_SECONDS = 120   # 2 min
+POLL_SECONDS = 120
 BOOKMAKER = "Bet365"
 
-# pré-jogo
 PRE_MIN = 10
 PRE_MAX = 60
 MIN_ODD_HT = 1.30
 
-# ao vivo - observação
 WATCH_MIN_MINUTE = 35
 WATCH_MAX_MINUTE = 42
 
-# ao vivo - entrada
 LIVE_MIN_MINUTE = 43
 LIVE_MAX_MINUTE = 55
 MIN_ODD_FT_LIVE = 1.30
@@ -32,8 +29,10 @@ MAX_ODD_FT_LIVE = 2.40
 
 ALERTS_PER_HOUR = 5
 
-# ligas boas
-ALLOWED_LEAGUES = [
+# resumo de diagnóstico a cada 10 min
+DEBUG_SUMMARY_SECONDS = 600
+
+ALLOWED_WORDS = [
     "premier league",
     "champions league",
     "europa league",
@@ -73,6 +72,7 @@ alerted_live = set()
 watched_live = set()
 last_status_msg = 0
 last_error_msg = None
+last_debug_summary = 0
 
 # =========================
 # TELEGRAM
@@ -112,18 +112,27 @@ def minutes_to_event(dt_str: str):
     diff = event_dt - now
     return int(diff.total_seconds() // 60)
 
-def league_ok(league_name: str):
-    if not league_name:
-        return False
+def league_ok(ev: dict):
+    # tenta nome + slug + sport
+    parts = []
 
-    name = league_name.lower().strip()
+    league = ev.get("league")
+    if isinstance(league, dict):
+        parts.append(str(league.get("name", "")))
+        parts.append(str(league.get("slug", "")))
+    else:
+        parts.append(str(league or ""))
+
+    parts.append(str(ev.get("sport", "")))
+
+    text = " | ".join(parts).lower().strip()
 
     for bad in BLOCKED_WORDS:
-        if bad in name:
+        if bad in text:
             return False
 
-    for item in ALLOWED_LEAGUES:
-        if item in name:
+    for item in ALLOWED_WORDS:
+        if item in text:
             return True
 
     return False
@@ -201,6 +210,7 @@ def get_upcoming_events():
     })
 
 def get_live_events():
+    # se esse endpoint vier vazio, o resumo vai mostrar isso
     return api_get("/events/live", {
         "sport": "football",
         "bookmaker": BOOKMAKER
@@ -213,7 +223,7 @@ def get_event_odds(event_id: int):
     })
 
 # =========================
-# MERCADOS
+# MERCADO
 # =========================
 def _try_float(v):
     try:
@@ -269,8 +279,7 @@ def scan_pregame():
         if event_id in alerted_pre:
             continue
 
-        league_name = (ev.get("league") or {}).get("name", "")
-        if not league_ok(league_name):
+        if not league_ok(ev):
             continue
 
         status = str(ev.get("status") or "").lower()
@@ -292,14 +301,14 @@ def scan_pregame():
             continue
 
         if ht_odd >= MIN_ODD_HT:
+            league_name = (ev.get("league") or {}).get("name", "")
             msg = (
                 "🚨 ALERTA PRÉ (0.5 HT)\n"
                 f"🏆 {league_name}\n"
                 f"{ev.get('home')} x {ev.get('away')}\n"
                 f"⏳ Faltam {mins} min\n"
                 f"🎲 O0.5 HT: {ht_odd:.2f}\n"
-                f"📚 Bookmaker: {BOOKMAKER}\n"
-                "📌 Estratégia: entrada pré-jogo"
+                f"📚 Bookmaker: {BOOKMAKER}"
             )
             tg_send(msg)
             alerted_pre.add(event_id)
@@ -310,29 +319,48 @@ def scan_pregame():
                 break
 
 # =========================
-# AO VIVO
+# AO VIVO + DIAGNÓSTICO
 # =========================
 def scan_live():
+    global last_debug_summary
+
     events = get_live_events()
+
+    total_live = 0
+    passed_league = 0
+    valid_minute = 0
+    valid_score = 0
+    watch_zone = 0
+    entry_zone = 0
+    zero_zero_entry = 0
+    odds_found = 0
+
     sent_watch = 0
     sent_entry = 0
 
     for ev in events:
-        league_name = (ev.get("league") or {}).get("name", "")
-        if not league_ok(league_name):
+        total_live += 1
+
+        if not league_ok(ev):
             continue
+        passed_league += 1
 
         event_id = ev.get("id")
+        league_name = (ev.get("league") or {}).get("name", "")
+
         minute = get_event_minute(ev)
         if minute is None:
             continue
+        valid_minute += 1
 
         home_score, away_score = get_event_score(ev)
         if home_score is None or away_score is None:
             continue
+        valid_score += 1
 
-        # OBSERVAÇÃO 35-42
+        # observação
         if WATCH_MIN_MINUTE <= minute <= WATCH_MAX_MINUTE:
+            watch_zone += 1
             if event_id not in watched_live:
                 msg = (
                     "👀 OBSERVAÇÃO AO VIVO\n"
@@ -340,30 +368,33 @@ def scan_live():
                     f"{ev.get('home')} x {ev.get('away')}\n"
                     f"⏱ Minuto: {minute}'\n"
                     f"📊 Placar: {home_score}-{away_score}\n"
-                    "📌 Fique de olho: possível entrada no 45'/intervalo se continuar 0-0"
+                    "📌 Possível entrada no 45'/intervalo se seguir 0-0"
                 )
                 tg_send(msg)
                 watched_live.add(event_id)
                 sent_watch += 1
 
-        # ENTRADA 43-55
-        if not can_alert():
-            break
-
+        # entrada
         if event_id in alerted_live:
             continue
 
         if minute < LIVE_MIN_MINUTE or minute > LIVE_MAX_MINUTE:
             continue
+        entry_zone += 1
 
         if home_score != 0 or away_score != 0:
             continue
+        zero_zero_entry += 1
 
         odds_json = get_event_odds(event_id)
         ft_odd = extract_market_odd(odds_json, "FT_OVER_0_5")
 
         if ft_odd is None:
             continue
+        odds_found += 1
+
+        if not can_alert():
+            break
 
         if MIN_ODD_FT_LIVE <= ft_odd <= MAX_ODD_FT_LIVE:
             msg = (
@@ -373,8 +404,7 @@ def scan_live():
                 f"⏱ Minuto: {minute}'\n"
                 f"📊 Placar: {home_score}-{away_score}\n"
                 f"🎲 O0.5 FT: {ft_odd:.2f}\n"
-                f"📚 Bookmaker: {BOOKMAKER}\n"
-                "📌 Estratégia: entrada no 45'/intervalo"
+                f"📚 Bookmaker: {BOOKMAKER}"
             )
             tg_send(msg)
             alerted_live.add(event_id)
@@ -384,27 +414,36 @@ def scan_live():
             if sent_entry >= 2:
                 break
 
+    # resumo útil a cada 10 min
+    now_ts = time.time()
+    if now_ts - last_debug_summary > DEBUG_SUMMARY_SECONDS:
+        tg_send(
+            "📊 RESUMO LIVE\n"
+            f"ao vivo vistos: {total_live}\n"
+            f"liga ok: {passed_league}\n"
+            f"minuto ok: {valid_minute}\n"
+            f"placar ok: {valid_score}\n"
+            f"zona observação 35-42: {watch_zone}\n"
+            f"zona entrada 43-55: {entry_zone}\n"
+            f"0-0 na zona entrada: {zero_zero_entry}\n"
+            f"odd encontrada: {odds_found}\n"
+            f"alertas enviados agora: obs {sent_watch} | entrada {sent_entry}"
+        )
+        last_debug_summary = now_ts
+
 # =========================
 # MAIN
 # =========================
 def main():
     global last_status_msg, last_error_msg
 
-    tg_send("✅ Bot iniciado na Odds-API.io (pré + observação + 45')")
+    tg_send("✅ Bot iniciado na Odds-API.io (diagnóstico)")
 
     while True:
         try:
-            now_ts = time.time()
-
-            # sinal de vida a cada 2 min
-            if now_ts - last_status_msg > 120:
-                cleanup_alert_times()
-                tg_send(f"✅ BOT ON | alertas(60m): {len(alert_times)}/{ALERTS_PER_HOUR} | monitorando...")
-                last_status_msg = now_ts
-
+            # sem spam de 'BOT ON'
             scan_pregame()
             scan_live()
-
             time.sleep(POLL_SECONDS)
 
         except Exception as e:
