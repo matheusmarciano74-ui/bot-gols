@@ -3,33 +3,20 @@ import time
 import requests
 from datetime import datetime, timezone
 
-# =========================
-# ENV
-# =========================
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID")
 
 BASE_URL = "https://api.odds-api.io/v3"
 
-# =========================
-# CONFIG
-# =========================
-POLL_SECONDS = 300  # 5 min
-PRE_MIN = 10        # mínimo de minutos antes do jogo
-PRE_MAX = 60        # máximo de minutos antes do jogo
-
-# mercados/odds mínimos
+POLL_SECONDS = 300
+PRE_MIN = 10
+PRE_MAX = 60
 MIN_ODD_HT = 1.30
 MIN_ODD_FT_LIVE = 1.35
-
-# limite de alertas por hora
 ALERTS_PER_HOUR = 5
-
-# bookmaker principal
 BOOKMAKER = "Bet365"
 
-# ligas que você quer
 TARGET_LEAGUES = [
     "Premier League",
     "Championship",
@@ -41,9 +28,8 @@ TARGET_LEAGUES = [
     "DFB Pokal",
     "Serie A",
     "Coppa Italia",
-    "Brasileirao",
-    "Serie A",
     "Copa do Brasil",
+    "Brasileirao",
     "Liga Profesional Argentina",
     "Copa Argentina",
     "UEFA Champions League",
@@ -53,31 +39,29 @@ TARGET_LEAGUES = [
     "CONMEBOL Sudamericana"
 ]
 
-# =========================
-# STATE
-# =========================
+BLOCKED_WORDS = [
+    "singapore",
+    "malta",
+    "paola",
+    "geylang",
+]
+
 alert_times = []
 alerted_pre = set()
 alerted_live = set()
 last_status_msg = 0
+last_error_msg = None
 
-# =========================
-# TELEGRAM
-# =========================
 def tg_send(msg: str):
     if not TG_TOKEN or not TG_CHAT:
         print("Telegram vars missing")
         return
-
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     try:
         requests.post(url, data={"chat_id": TG_CHAT, "text": msg}, timeout=15)
     except Exception as e:
         print("Telegram error:", e)
 
-# =========================
-# HELPERS
-# =========================
 def cleanup_alert_times():
     global alert_times
     now = datetime.now()
@@ -91,7 +75,6 @@ def record_alert():
     alert_times.append(datetime.now())
 
 def parse_dt(dt_str: str):
-    # Ex.: 2025-10-15T15:00:00Z
     return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
 
 def minutes_to_event(dt_str: str):
@@ -102,15 +85,20 @@ def minutes_to_event(dt_str: str):
 
 def league_ok(league_name: str):
     name = (league_name or "").lower()
+
+    for bad in BLOCKED_WORDS:
+        if bad in name:
+            return False
+
     for item in TARGET_LEAGUES:
         if item.lower() in name:
             return True
+
     return False
 
-# =========================
-# ODDS API
-# =========================
 def api_get(path: str, params: dict):
+    global last_error_msg
+
     if not ODDS_API_KEY:
         raise RuntimeError("ODDS_API_KEY não configurada no Railway")
 
@@ -130,29 +118,23 @@ def api_get(path: str, params: dict):
     return r.json()
 
 def get_upcoming_events():
-    # docs oficiais mostram /events com sport=football e limit
     return api_get("/events", {
         "sport": "football",
         "limit": 100
     })
 
 def get_live_events():
-    # docs oficiais mostram status=live
     return api_get("/events", {
         "sport": "football",
         "status": "live"
     })
 
 def get_event_odds(event_id: int):
-    # docs oficiais mostram /odds?eventId=...&bookmakers=...
     return api_get("/odds", {
         "eventId": event_id,
         "bookmakers": BOOKMAKER
     })
 
-# =========================
-# PARSER DE MERCADOS
-# =========================
 def _try_float(v):
     try:
         return float(v)
@@ -160,77 +142,38 @@ def _try_float(v):
         return None
 
 def extract_market_odd(odds_json: dict, target: str):
-    """
-    target:
-      - "HT_OVER_0_5"
-      - "FT_OVER_0_5"
-
-    Como os nomes de mercado podem variar por bookmaker,
-    este parser tenta achar padrões comuns.
-    Se não encontrar, retorna None.
-    """
     bookmakers = odds_json.get("bookmakers", {})
     if not bookmakers:
         return None
 
-    for book_name, markets in bookmakers.items():
+    for _, markets in bookmakers.items():
         for market in markets or []:
             market_name = str(market.get("name", "")).lower()
             odds_list = market.get("odds", []) or []
 
-            # mercados de interesse
             is_ht = any(x in market_name for x in ["1st half", "first half", "1h", "half"])
-            is_ft = not is_ht
-
             wants_ht = (target == "HT_OVER_0_5")
             wants_ft = (target == "FT_OVER_0_5")
 
-            # precisa ser o tipo certo
             if wants_ht and not is_ht:
                 continue
-            if wants_ft and not is_ft:
-                # evita pegar mercado de primeiro tempo quando quer FT
+            if wants_ft and is_ht:
                 continue
 
-            # tentar achar referência a over/under 0.5 no nome
-            likely_ou = any(x in market_name for x in ["over", "under", "o/u", "ou", "totals", "total"])
-            likely_half_point = "0.5" in market_name
-
             for item in odds_list:
-                # caso 1: dict simples com chave "over"
-                if isinstance(item, dict):
-                    over_val = None
+                if not isinstance(item, dict):
+                    continue
 
-                    # formas mais comuns
-                    for key in ["over", "Over", "o", "O"]:
-                        if key in item:
-                            over_val = _try_float(item[key])
-                            if over_val is not None:
-                                break
+                joined = " ".join([str(k) + " " + str(v) for k, v in item.items()]).lower()
 
-                    # caso 2: dicionário genérico com texto
-                    joined = " ".join([str(k) + " " + str(v) for k, v in item.items()]).lower()
-
-                    if over_val is None:
-                        # tenta achar em estruturas tipo {"label":"Over 0.5","odd":"1.35"}
-                        if "over" in joined and "0.5" in joined:
-                            for k in ["odd", "price", "value"]:
-                                if k in item:
-                                    over_val = _try_float(item[k])
-                                    if over_val is not None:
-                                        break
-
-                    # valida contexto
-                    if over_val is not None:
-                        if likely_ou or ("over" in joined):
-                            if likely_half_point or ("0.5" in joined):
-                                return over_val
-
+                if "over" in joined and "0.5" in joined:
+                    for k in ["odd", "price", "value", "over", "Over"]:
+                        if k in item:
+                            v = _try_float(item[k])
+                            if v is not None:
+                                return v
     return None
 
-# =========================
-# BOT LOGIC
-# =========================
 def scan_pregame():
     events = get_upcoming_events()
     sent = 0
@@ -249,7 +192,6 @@ def scan_pregame():
 
         status = (ev.get("status") or "").lower()
         if status not in ["pending", "upcoming", "not_started", "scheduled"]:
-            # upcoming docs mostram "pending"
             continue
 
         mins = minutes_to_event(ev.get("date"))
@@ -277,7 +219,6 @@ def scan_pregame():
             sent += 1
 
             if sent >= 3:
-                # trava extra por rodada
                 break
 
 def scan_live():
@@ -319,7 +260,7 @@ def scan_live():
                 break
 
 def main():
-    global last_status_msg
+    global last_status_msg, last_error_msg
 
     tg_send("✅ Bot iniciado na Odds-API.io")
 
@@ -338,7 +279,10 @@ def main():
             time.sleep(POLL_SECONDS)
 
         except Exception as e:
-            tg_send(f"❌ Erro bot: {e}")
+            msg = f"❌ Erro bot: {e}"
+            if msg != last_error_msg:
+                tg_send(msg)
+                last_error_msg = msg
             time.sleep(120)
 
 if __name__ == "__main__":
