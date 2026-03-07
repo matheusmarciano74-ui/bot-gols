@@ -1,7 +1,7 @@
 import os
 import time
 import requests
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 
 # =========================
 # ENV
@@ -18,20 +18,27 @@ TZ = "America/Sao_Paulo"
 # =========================
 # CONFIG
 # =========================
-POLL_SECONDS = 300          # 5 min
-ALERTS_PER_HOUR = 5
-DEBUG_SUMMARY_SECONDS = 600 # 10 min
+POLL_SECONDS = 120               # 2 min
+SUMMARY_SECONDS = 600            # 10 min
+ALERTS_PER_HOUR = 8              # pode subir agora que você tem plano
 
+# PRÉ-JOGO
+PRE_MIN = 10
+PRE_MAX = 60
+MIN_ODD_HT = 1.30
+
+# AO VIVO
 WATCH_MIN = 35
 WATCH_MAX = 42
 
 ENTRY_MIN = 43
-ENTRY_MAX = 55
+ENTRY_MAX = 70
 
 MIN_SHOTS = 8
 MIN_SOT = 2
 MIN_CORNERS = 3
 MIN_ODD_FT = 1.30
+MAX_ODD_FT = 2.60               # evita odd muito esticada
 
 BOOKMAKER = "Bet365"
 
@@ -75,6 +82,7 @@ BLOCKED = [
 alert_times = []
 watched_live = set()
 alerted_live = set()
+alerted_pre = set()
 last_summary = 0
 last_error = None
 
@@ -88,7 +96,11 @@ def tg_send(msg: str):
 
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     try:
-        requests.post(url, data={"chat_id": TG_CHAT, "text": msg}, timeout=15)
+        requests.post(
+            url,
+            data={"chat_id": TG_CHAT, "text": msg},
+            timeout=15
+        )
     except Exception as e:
         print("Telegram error:", e)
 
@@ -111,12 +123,14 @@ def league_ok(name: str):
     if not name:
         return False
 
+    low = name.lower()
+
     for b in BLOCKED:
-        if b.lower() in name.lower():
+        if b.lower() in low:
             return False
 
     for t in TARGET_LEAGUES:
-        if t.lower() in name.lower():
+        if t.lower() in low:
             return True
 
     return False
@@ -125,17 +139,31 @@ def norm_team_name(name: str) -> str:
     if not name:
         return ""
     s = name.lower().strip()
+
     replacements = {
         " fc": "",
         " cf": "",
         " sc": "",
         " ac ": " ",
-        "  ": " ",
         "-": " ",
+        ".": "",
+        ",": "",
+        "  ": " ",
     }
+
     for a, b in replacements.items():
         s = s.replace(a, b)
+
     return " ".join(s.split())
+
+def parse_dt(dt_str: str):
+    return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+
+def minutes_to_event(dt_str: str):
+    event_dt = parse_dt(dt_str)
+    now = datetime.now(timezone.utc)
+    diff = event_dt - now
+    return int(diff.total_seconds() // 60)
 
 # =========================
 # API FOOTBALL
@@ -148,7 +176,7 @@ def api(path: str, params: dict):
     r = requests.get(API + path, headers=headers, params=params, timeout=25)
 
     if r.status_code >= 400:
-        raise RuntimeError(f"Erro API {r.status_code}: {r.text[:200]}")
+        raise RuntimeError(f"Erro API-Football {r.status_code}: {r.text[:200]}")
 
     j = r.json()
 
@@ -175,6 +203,13 @@ def odds_api_get(path: str, params: dict):
 
     return r.json()
 
+def get_upcoming_odds_events():
+    return odds_api_get("/events", {
+        "sport": "football",
+        "bookmaker": BOOKMAKER,
+        "limit": 150
+    })
+
 def get_live_odds_events():
     return odds_api_get("/events/live", {
         "sport": "football",
@@ -187,7 +222,21 @@ def get_event_odds(event_id: int):
         "bookmakers": BOOKMAKER
     })
 
-def extract_ft_over05_odd(odds_json: dict):
+# =========================
+# ODDS PARSER
+# =========================
+def _try_float(v):
+    try:
+        return float(v)
+    except:
+        return None
+
+def extract_market_odd(odds_json: dict, target: str):
+    """
+    target:
+      - HT_OVER_0_5
+      - FT_OVER_0_5
+    """
     bookmakers = odds_json.get("bookmakers", {})
     if not bookmakers:
         return None
@@ -195,12 +244,16 @@ def extract_ft_over05_odd(odds_json: dict):
     for _, markets in bookmakers.items():
         for market in markets or []:
             market_name = str(market.get("name", "")).lower()
-
-            # ignora mercados de 1º tempo
-            if "half" in market_name:
-                continue
-
             odds_list = market.get("odds", []) or []
+
+            is_ht = any(x in market_name for x in ["1st half", "first half", "1h", "half"])
+            wants_ht = target == "HT_OVER_0_5"
+            wants_ft = target == "FT_OVER_0_5"
+
+            if wants_ht and not is_ht:
+                continue
+            if wants_ft and is_ht:
+                continue
 
             for item in odds_list:
                 if not isinstance(item, dict):
@@ -211,15 +264,14 @@ def extract_ft_over05_odd(odds_json: dict):
                 if "over" in text and "0.5" in text:
                     for k in ["odd", "price", "value", "over", "Over"]:
                         if k in item:
-                            try:
-                                return float(item[k])
-                            except:
-                                pass
+                            val = _try_float(item[k])
+                            if val is not None:
+                                return val
 
     return None
 
 # =========================
-# LIVE GAMES
+# API FOOTBALL DATA
 # =========================
 def get_today_fixtures():
     today = date.today().isoformat()
@@ -277,32 +329,90 @@ def get_live_candidates():
     return out
 
 # =========================
-# MATCH ODDS EVENT
+# MATCHING ODDS <-> FIXTURE
 # =========================
-def find_matching_odds_event_id(home_name: str, away_name: str, live_odds_events: list):
+def find_matching_odds_event_id(home_name: str, away_name: str, odds_events: list):
     home_norm = norm_team_name(home_name)
     away_norm = norm_team_name(away_name)
 
-    for ev in live_odds_events:
+    # match exato
+    for ev in odds_events:
         oh = norm_team_name(str(ev.get("home", "")))
         oa = norm_team_name(str(ev.get("away", "")))
-
         if home_norm == oh and away_norm == oa:
             return ev.get("id")
 
-    # fallback mais flexível
-    for ev in live_odds_events:
+    # fallback flexível
+    for ev in odds_events:
         oh = norm_team_name(str(ev.get("home", "")))
         oa = norm_team_name(str(ev.get("away", "")))
 
-        if home_norm in oh or oh in home_norm:
-            if away_norm in oa or oa in away_norm:
-                return ev.get("id")
+        if (home_norm in oh or oh in home_norm) and (away_norm in oa or oa in away_norm):
+            return ev.get("id")
 
     return None
 
 # =========================
-# MAIN LOGIC
+# PRE-GAME HT
+# =========================
+def scan_pregame():
+    sent = 0
+    checked_odds = 0
+
+    try:
+        events = get_upcoming_odds_events()
+    except Exception:
+        return {"pre_checked": 0, "pre_sent": 0}
+
+    for ev in events:
+        if not can_alert():
+            break
+
+        event_id = ev.get("id")
+        if event_id in alerted_pre:
+            continue
+
+        league_name = str((ev.get("league") or {}).get("name", ""))
+        if not league_ok(league_name):
+            continue
+
+        event_date = ev.get("date")
+        if not event_date:
+            continue
+
+        mins = minutes_to_event(event_date)
+        if mins < PRE_MIN or mins > PRE_MAX:
+            continue
+
+        odds_json = get_event_odds(event_id)
+        checked_odds += 1
+        ht_odd = extract_market_odd(odds_json, "HT_OVER_0_5")
+
+        if ht_odd is None:
+            continue
+
+        if ht_odd >= MIN_ODD_HT:
+            msg = (
+                "🚨 ALERTA PRÉ (0.5 HT)\n"
+                f"🏆 {league_name}\n"
+                f"{ev.get('home')} x {ev.get('away')}\n"
+                f"⏳ Faltam {mins} min\n"
+                f"🎲 Odd O0.5 HT: {ht_odd:.2f}\n"
+                f"📚 Bookmaker: {BOOKMAKER}\n"
+                "✅ Entrada pré-jogo com odd mínima 1.30"
+            )
+            tg_send(msg)
+            alerted_pre.add(event_id)
+            record_alert()
+            sent += 1
+
+            if sent >= 3:
+                break
+
+    return {"pre_checked": checked_odds, "pre_sent": sent}
+
+# =========================
+# LIVE LOGIC
 # =========================
 def scan_live():
     global last_summary
@@ -376,14 +486,14 @@ def scan_live():
 
         odds_checked += 1
         odds_json = get_event_odds(matched_event_id)
-        odd_ft = extract_ft_over05_odd(odds_json)
+        odd_ft = extract_market_odd(odds_json, "FT_OVER_0_5")
 
         if odd_ft is None:
             continue
 
         odds_found += 1
 
-        if odd_ft >= MIN_ODD_FT:
+        if MIN_ODD_FT <= odd_ft <= MAX_ODD_FT:
             msg = (
                 "⚽ ENTRADA AO VIVO (0.5 FT)\n"
                 f"🏆 {g['league']}\n"
@@ -402,18 +512,22 @@ def scan_live():
             alerts_entry += 1
 
     now_ts = time.time()
-    if now_ts - last_summary > DEBUG_SUMMARY_SECONDS:
+    if now_ts - last_summary > SUMMARY_SECONDS:
+        pre_info = scan_pregame()
+
         tg_send(
-            "📊 RESUMO LIVE V3\n"
-            f"jogos ao vivo: {total}\n"
+            "📊 RESUMO V4\n"
+            f"ao vivo: {total}\n"
             f"0-0: {zero_zero}\n"
             f"faixa observação 35-42: {watch_zone}\n"
-            f"faixa entrada 43-55: {entry_zone}\n"
+            f"faixa entrada 43-70: {entry_zone}\n"
             f"stats consultadas: {stats_checked}\n"
-            f"odds consultadas: {odds_checked}\n"
-            f"odds encontradas: {odds_found}\n"
+            f"odds consultadas live: {odds_checked}\n"
+            f"odds encontradas live: {odds_found}\n"
             f"obs enviadas: {alerts_obs}\n"
-            f"entradas enviadas: {alerts_entry}"
+            f"entradas live enviadas: {alerts_entry}\n"
+            f"odds pré consultadas: {pre_info['pre_checked']}\n"
+            f"entradas pré enviadas: {pre_info['pre_sent']}"
         )
         last_summary = now_ts
 
@@ -423,7 +537,7 @@ def scan_live():
 def main():
     global last_error
 
-    tg_send("✅ Bot V3 iniciado (pressão + odd mínima 1.30)")
+    tg_send("✅ Bot V4 iniciado (pré HT + live com pressão + odd 1.30)")
 
     while True:
         try:
