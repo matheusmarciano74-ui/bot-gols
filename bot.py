@@ -18,27 +18,22 @@ TZ = "America/Sao_Paulo"
 # =========================
 # CONFIG
 # =========================
-POLL_SECONDS = 120               # 2 min
-SUMMARY_SECONDS = 600            # 10 min
-ALERTS_PER_HOUR = 8              # pode subir agora que você tem plano
+POLL_SECONDS = 120
+SUMMARY_SECONDS = 600
+ALERTS_PER_HOUR = 8
 
-# PRÉ-JOGO
 PRE_MIN = 10
 PRE_MAX = 60
 MIN_ODD_HT = 1.30
 
-# AO VIVO
 WATCH_MIN = 35
 WATCH_MAX = 42
 
 ENTRY_MIN = 43
 ENTRY_MAX = 70
 
-MIN_SHOTS = 8
-MIN_SOT = 2
-MIN_CORNERS = 3
 MIN_ODD_FT = 1.30
-MAX_ODD_FT = 2.60               # evita odd muito esticada
+MAX_ODD_FT = 2.60
 
 BOOKMAKER = "Bet365"
 
@@ -73,8 +68,34 @@ BLOCKED = [
     "Malta",
     "Algeria",
     "Tunisia",
-    "Morocco"
+    "Morocco",
+    "India",
+    "Indonesia"
 ]
+
+LEAGUE_PRIORITY = {
+    "Premier League": 12,
+    "Bundesliga": 12,
+    "Serie A": 11,
+    "UEFA Champions League": 12,
+    "UEFA Europa League": 10,
+    "UEFA Europa Conference League": 9,
+    "Ligue 1": 10,
+    "Copa do Brasil": 10,
+    "Serie A (Brazil)": 10,
+    "Brasileirao": 10,
+    "CONMEBOL Libertadores": 11,
+    "CONMEBOL Sudamericana": 9,
+    "Liga Profesional Argentina": 8,
+    "Copa Argentina": 7,
+    "FA Cup": 8,
+    "EFL Cup": 7,
+    "Coppa Italia": 8,
+    "DFB Pokal": 8,
+    "Coupe de France": 8,
+    "Championship": 7,
+    "League Cup": 7
+}
 
 # =========================
 # STATE
@@ -96,11 +117,7 @@ def tg_send(msg: str):
 
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     try:
-        requests.post(
-            url,
-            data={"chat_id": TG_CHAT, "text": msg},
-            timeout=15
-        )
+        requests.post(url, data={"chat_id": TG_CHAT, "text": msg}, timeout=15)
     except Exception as e:
         print("Telegram error:", e)
 
@@ -135,11 +152,18 @@ def league_ok(name: str):
 
     return False
 
+def league_score(name: str):
+    if not name:
+        return 0
+    for k, v in LEAGUE_PRIORITY.items():
+        if k.lower() in name.lower():
+            return v
+    return 5
+
 def norm_team_name(name: str) -> str:
     if not name:
         return ""
     s = name.lower().strip()
-
     replacements = {
         " fc": "",
         " cf": "",
@@ -150,10 +174,8 @@ def norm_team_name(name: str) -> str:
         ",": "",
         "  ": " ",
     }
-
     for a, b in replacements.items():
         s = s.replace(a, b)
-
     return " ".join(s.split())
 
 def parse_dt(dt_str: str):
@@ -232,11 +254,6 @@ def _try_float(v):
         return None
 
 def extract_market_odd(odds_json: dict, target: str):
-    """
-    target:
-      - HT_OVER_0_5
-      - FT_OVER_0_5
-    """
     bookmakers = odds_json.get("bookmakers", {})
     if not bookmakers:
         return None
@@ -267,7 +284,6 @@ def extract_market_odd(odds_json: dict, target: str):
                             val = _try_float(item[k])
                             if val is not None:
                                 return val
-
     return None
 
 # =========================
@@ -286,17 +302,35 @@ def get_stats(fid: int):
     shots = 0
     sot = 0
     corners = 0
+    dangerous = 0
+    possession_home = 0
+    possession_away = 0
 
-    for team in stats:
+    for idx, team in enumerate(stats):
         for s in team.get("statistics", []) or []:
-            if s["type"] == "Total Shots":
-                shots += s["value"] or 0
-            elif s["type"] == "Shots on Goal":
-                sot += s["value"] or 0
-            elif s["type"] == "Corner Kicks":
-                corners += s["value"] or 0
+            t = s.get("type")
+            v = s.get("value")
 
-    return shots, sot, corners
+            if t == "Total Shots":
+                shots += v or 0
+            elif t == "Shots on Goal":
+                sot += v or 0
+            elif t == "Corner Kicks":
+                corners += v or 0
+            elif t == "Dangerous Attacks":
+                dangerous += v or 0
+            elif t == "Ball Possession":
+                try:
+                    val = int(str(v).replace("%", "").strip())
+                    if idx == 0:
+                        possession_home = val
+                    else:
+                        possession_away = val
+                except:
+                    pass
+
+    max_possession = max(possession_home, possession_away)
+    return shots, sot, corners, dangerous, max_possession
 
 def get_live_candidates():
     fixtures = get_today_fixtures()
@@ -329,20 +363,18 @@ def get_live_candidates():
     return out
 
 # =========================
-# MATCHING ODDS <-> FIXTURE
+# MATCH ODDS <-> FIXTURE
 # =========================
 def find_matching_odds_event_id(home_name: str, away_name: str, odds_events: list):
     home_norm = norm_team_name(home_name)
     away_norm = norm_team_name(away_name)
 
-    # match exato
     for ev in odds_events:
         oh = norm_team_name(str(ev.get("home", "")))
         oa = norm_team_name(str(ev.get("away", "")))
         if home_norm == oh and away_norm == oa:
             return ev.get("id")
 
-    # fallback flexível
     for ev in odds_events:
         oh = norm_team_name(str(ev.get("home", "")))
         oa = norm_team_name(str(ev.get("away", "")))
@@ -351,6 +383,66 @@ def find_matching_odds_event_id(home_name: str, away_name: str, odds_events: lis
             return ev.get("id")
 
     return None
+
+# =========================
+# PRESSURE SCORE
+# =========================
+def pressure_score(league: str, minute: int, shots: int, sot: int, corners: int, dangerous: int, max_possession: int):
+    score = 0
+
+    # chutes
+    if shots >= 8:
+        score += 10
+    if shots >= 10:
+        score += 8
+    if shots >= 12:
+        score += 6
+
+    # no alvo
+    if sot >= 2:
+        score += 12
+    if sot >= 3:
+        score += 8
+    if sot >= 4:
+        score += 5
+
+    # escanteios
+    if corners >= 3:
+        score += 8
+    if corners >= 5:
+        score += 5
+
+    # ataques perigosos
+    if dangerous >= 30:
+        score += 10
+    if dangerous >= 40:
+        score += 10
+    if dangerous >= 55:
+        score += 5
+
+    # posse
+    if max_possession >= 55:
+        score += 4
+    if max_possession >= 60:
+        score += 4
+
+    # minuto mais maduro
+    if 43 <= minute <= 55:
+        score += 8
+    elif 56 <= minute <= 70:
+        score += 5
+
+    # peso da liga
+    score += league_score(league)
+
+    return min(score, 100)
+
+def classify_score(score: int):
+    if score >= 55:
+        return "FORTE"
+    if score >= 42:
+        return "MODERADA"
+    return "FRACA"
 
 # =========================
 # PRE-GAME HT
@@ -453,7 +545,7 @@ def scan_live():
                     f"{g['home']} x {g['away']}\n"
                     f"⏱ Minuto: {minute}'\n"
                     f"📊 Placar: {score}\n"
-                    "📌 Se seguir 0-0 e com pressão, pode virar entrada no intervalo"
+                    "📌 Se seguir 0-0 e com pressão, pode virar entrada"
                 )
                 tg_send(msg)
                 watched_live.add(fid)
@@ -474,10 +566,15 @@ def scan_live():
         if score != "0-0":
             continue
 
-        shots, sot, corners = get_stats(fid)
+        shots, sot, corners, dangerous, max_possession = get_stats(fid)
         stats_checked += 1
 
-        if shots < MIN_SHOTS or sot < MIN_SOT or corners < MIN_CORNERS:
+        score_pressure = pressure_score(
+            g["league"], minute, shots, sot, corners, dangerous, max_possession
+        )
+        level = classify_score(score_pressure)
+
+        if score_pressure < 42:
             continue
 
         matched_event_id = find_matching_odds_event_id(g["home"], g["away"], live_odds_events)
@@ -494,8 +591,9 @@ def scan_live():
         odds_found += 1
 
         if MIN_ODD_FT <= odd_ft <= MAX_ODD_FT:
+            icon = "⚽" if level == "FORTE" else "⚠️"
             msg = (
-                "⚽ ENTRADA AO VIVO (0.5 FT)\n"
+                f"{icon} ENTRADA {level} (0.5 FT)\n"
                 f"🏆 {g['league']}\n"
                 f"{g['home']} x {g['away']}\n"
                 f"⏱ Minuto: {minute}'\n"
@@ -503,8 +601,11 @@ def scan_live():
                 f"📈 Chutes: {shots}\n"
                 f"🎯 No alvo: {sot}\n"
                 f"🚩 Escanteios: {corners}\n"
+                f"🔥 Ataques perigosos: {dangerous}\n"
+                f"📌 Posse máx: {max_possession}%\n"
+                f"🧠 Score pressão: {score_pressure}\n"
                 f"🎲 Odd O0.5 FT: {odd_ft:.2f}\n"
-                "✅ Jogo com pressão + odd mínima 1.30"
+                "✅ Pressão + odd mínima 1.30"
             )
             tg_send(msg)
             alerted_live.add(fid)
@@ -516,7 +617,7 @@ def scan_live():
         pre_info = scan_pregame()
 
         tg_send(
-            "📊 RESUMO V4\n"
+            "📊 RESUMO V5\n"
             f"ao vivo: {total}\n"
             f"0-0: {zero_zero}\n"
             f"faixa observação 35-42: {watch_zone}\n"
@@ -537,7 +638,7 @@ def scan_live():
 def main():
     global last_error
 
-    tg_send("✅ Bot V4 iniciado (pré HT + live com pressão + odd 1.30)")
+    tg_send("✅ Bot V5 iniciado (score de pressão + odd 1.30)")
 
     while True:
         try:
