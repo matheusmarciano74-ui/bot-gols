@@ -324,8 +324,8 @@ def main():
                 for u in updates["result"]:
                     offset = u["update_id"] + 1
                     msg = u.get("message", {})
-                    chat = str(msg.get("chat", {}).get("id", ""))
-                    if chat != TG_CHAT:
+                    chat = msg.get("chat", {}).get("id")
+                        if str(chat) != str(TG_CHAT):
                         continue
 
                     txt = msg.get("text", "").strip()
