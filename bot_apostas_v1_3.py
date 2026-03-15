@@ -44,6 +44,7 @@ def get_env(*names):
 
 TELEGRAM_BOT_TOKEN = get_env(
     "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_TOKEN",
     "BOT_TOKEN",
     "TOKEN"
 )
