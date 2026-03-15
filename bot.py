@@ -1,238 +1,220 @@
-import os
-import time
 import requests
+import time
+import os
+from datetime import datetime
 
-API_KEY = os.getenv("API_FOOTBALL_KEY")
-TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TG_CHAT = os.getenv("TELEGRAM_CHAT_ID")
+API_KEY = os.getenv("API_KEY")
+TG_TOKEN = os.getenv("TG_TOKEN")
+TG_CHAT = os.getenv("TG_CHAT")
 
-API = "https://v3.football.api-sports.io"
+BASE_URL = "https://api-football-v1.p.rapidapi.com/v3"
 
-POLL = 180
-STATUS_INTERVAL = 1800
-MAX_ALERTS = 5
-
-TARGET_LEAGUES = [
-    ("England","Premier League"),
-    ("Germany","Bundesliga"),
-    ("Italy","Serie A"),
-    ("Spain","La Liga"),
-    ("France","Ligue 1"),
-    ("Brazil","Serie A"),
-    ("Brazil","Copa do Brasil"),
-    ("USA","Major League Soccer"),
-    ("Netherlands","Eredivisie"),
-    ("Belgium","First Division A"),
-    ("Austria","Bundesliga"),
-    ("Switzerland","Super League"),
-    ("Denmark","Superliga"),
-    ("Norway","Eliteserien"),
-    ("Sweden","Allsvenskan"),
-    ("Turkey","Süper Lig"),
-    ("Argentina","Liga Profesional")
+LEAGUES_ALLOWED = [
+39,140,135,78,61,71,88,94,253,2,3
 ]
 
-alerted=set()
-alerts_hour=[]
-last_status=0
+headers = {
+"x-rapidapi-key": API_KEY,
+"x-rapidapi-host": "api-football-v1.p.rapidapi.com"
+}
+
+games_checked = 0
+games_valid = 0
+combos_sent = 0
+last_run = "-"
 
 
-def tg(msg):
+def send(msg):
+
     url=f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    requests.post(url,data={"chat_id":TG_CHAT,"text":msg})
+
+    requests.post(url,data={
+        "chat_id":TG_CHAT,
+        "text":msg
+    })
 
 
 def api(path,params):
-    headers={"x-apisports-key":API_KEY}
-    r=requests.get(API+path,headers=headers,params=params)
-    return r.json()["response"]
+
+    url = BASE_URL + path
+
+    r=requests.get(url,headers=headers,params=params)
+
+    return r.json()
 
 
-def league_ok(country,league):
-    for c,l in TARGET_LEAGUES:
-        if country==c and league==l:
-            return True
-    return False
+def get_today_matches():
+
+    data=api("/fixtures",{
+        "next":50
+    })
+
+    return data["response"]
 
 
-def get_stats(fid):
+def get_team_stats(team,league,season):
 
-    stats=api("/fixtures/statistics",{"fixture":fid})
+    data=api("/teams/statistics",{
+        "team":team,
+        "league":league,
+        "season":season
+    })
 
-    shots=0
-    sot=0
-    corners=0
-    danger=0
-
-    for team in stats:
-        for s in team["statistics"]:
-
-            if s["type"]=="Total Shots":
-                shots+=s["value"] or 0
-
-            if s["type"]=="Shots on Goal":
-                sot+=s["value"] or 0
-
-            if s["type"]=="Corner Kicks":
-                corners+=s["value"] or 0
-
-            if s["type"]=="Dangerous Attacks":
-                danger+=s["value"] or 0
-
-    return shots,sot,corners,danger
+    return data["response"]
 
 
-def bet365_link(home,away):
-    return f"https://www.google.com/search?q=bet365+{home}+vs+{away}"
+def good_match(match):
+
+    global games_checked
+    global games_valid
+
+    games_checked += 1
+
+    league_id=match["league"]["id"]
+
+    if league_id not in LEAGUES_ALLOWED:
+        return False
+
+    home=match["teams"]["home"]["id"]
+    away=match["teams"]["away"]["id"]
+    season=match["league"]["season"]
+
+    stats_home=get_team_stats(home,league_id,season)
+    stats_away=get_team_stats(away,league_id,season)
+
+    goals_home=stats_home["goals"]["for"]["average"]["home"]
+    goals_away=stats_away["goals"]["for"]["average"]["away"]
+
+    if float(goals_home) < 1.2:
+        return False
+
+    if float(goals_away) < 1.0:
+        return False
+
+    games_valid += 1
+
+    return True
 
 
-def can_alert():
+def build_combo():
 
-    now=time.time()
+    matches=get_today_matches()
 
-    alerts_hour[:]=[t for t in alerts_hour if now-t<3600]
+    good=[]
 
-    return len(alerts_hour)<MAX_ALERTS
+    for m in matches:
+
+        try:
+
+            if good_match(m):
+
+                good.append(m)
+
+        except:
+
+            pass
+
+    if len(good) >= 3:
+
+        return good[:3]
+
+    if len(good) >= 2:
+
+        return good[:2]
+
+    return None
+
+
+def format_combo(combo):
+
+    msg="🔥 COMBO OVER 0.5\n\n"
+
+    for m in combo:
+
+        home=m["teams"]["home"]["name"]
+        away=m["teams"]["away"]["name"]
+        league=m["league"]["name"]
+
+        msg+=f"{league}\n{home} x {away}\n\n"
+
+    msg+="Odd estimada ~1.30\n\n"
+
+    first=combo[0]
+
+    home=first["teams"]["home"]["name"]
+    away=first["teams"]["away"]["name"]
+
+    search=f"https://www.bet365.com/#/AC/B1/C1/D13/E181225/F2/?search={home}%20{away}"
+
+    msg+=f"🔎 Abrir Bet365:\n{search}"
+
+    return msg
+
+
+def check_commands():
+
+    url=f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates"
+
+    r=requests.get(url).json()
+
+    for u in r["result"]:
+
+        try:
+
+            chat=u["message"]["chat"]["id"]
+
+            text=u["message"]["text"]
+
+            if str(chat) != str(TG_CHAT):
+                continue
+
+            if text == "/status":
+
+                msg=f"""
+🤖 BOT ONLINE
+
+Jogos analisados: {games_checked}
+Jogos aprovados: {games_valid}
+Combos enviados hoje: {combos_sent}
+Última análise: {last_run}
+"""
+
+                send(msg)
+
+        except:
+            pass
 
 
 def main():
 
-    global last_status
+    global combos_sent
+    global last_run
 
-    tg("🤖 BOT OVER INICIADO")
+    send("🤖 BOT OVER 0.5 iniciado")
 
     while True:
 
         try:
 
-            games=api("/fixtures",{"live":"all"})
+            combo=build_combo()
 
-            total_live=len(games)
-            valid_league=0
-            alerts_sent=0
+            if combo:
 
-            for g in games:
+                msg=format_combo(combo)
 
-                league=g["league"]["name"]
-                country=g["league"]["country"]
+                send(msg)
 
-                if not league_ok(country,league):
-                    continue
+                combos_sent += 1
 
-                valid_league+=1
+            last_run=datetime.now().strftime("%H:%M")
 
-                if g["fixture"]["status"]["short"]!="1H":
-                    continue
-
-                minute=g["fixture"]["status"]["elapsed"] or 0
-
-                home=g["teams"]["home"]["name"]
-                away=g["teams"]["away"]["name"]
-
-                g1=g["goals"]["home"] or 0
-                g2=g["goals"]["away"] or 0
-
-                score=f"{g1}-{g2}"
-
-                fid=g["fixture"]["id"]
-
-                if fid in alerted:
-                    continue
-
-                shots,sot,corners,danger=get_stats(fid)
-
-                # HT
-                if 18<=minute<=37 and score=="0-0":
-
-                    if shots>=7 and sot>=2 and corners>=2 and danger>=20:
-
-                        if can_alert():
-
-                            link=bet365_link(home,away)
-
-                            msg=f"""🔥 OVER HT
-
-{country} {league}
-
-{home} x {away}
-
-⏱ {minute}'
-⚽ {score}
-
-📊 chutes {shots}
-🎯 no gol {sot}
-🚩 escanteios {corners}
-⚡ ataques perigosos {danger}
-
-➡ Over 0.5 HT
-
-🔗 {link}
-"""
-
-                            tg(msg)
-
-                            alerted.add(fid)
-                            alerts_hour.append(time.time())
-                            alerts_sent+=1
-
-
-                # FT
-                if 22<=minute<=65 and score in ["0-0","1-0","0-1"]:
-
-                    if shots>=8 and sot>=2 and corners>=3 and danger>=22:
-
-                        if can_alert():
-
-                            link=bet365_link(home,away)
-
-                            msg=f"""🔵 OVER FT
-
-{country} {league}
-
-{home} x {away}
-
-⏱ {minute}'
-⚽ {score}
-
-📊 chutes {shots}
-🎯 no gol {sot}
-🚩 escanteios {corners}
-⚡ ataques perigosos {danger}
-
-➡ Over 1.5 FT
-
-🔗 {link}
-"""
-
-                            tg(msg)
-
-                            alerted.add(fid)
-                            alerts_hour.append(time.time())
-                            alerts_sent+=1
-
-
-            now=time.time()
-
-            if now-last_status>STATUS_INTERVAL:
-
-                tg(f"""📡 BOT STATUS
-
-Jogos ao vivo analisados: {total_live}
-Jogos em ligas válidas: {valid_league}
-Alertas enviados neste ciclo: {alerts_sent}
-""")
-
-                last_status=now
-
-
-            time.sleep(POLL)
+            check_commands()
 
         except Exception as e:
 
-            tg(f"erro {e}")
+            send(f"erro {e}")
 
-            time.sleep(60)
+        time.sleep(1800)
 
 
-if __name__=="__main__":
-    main()
+main()
