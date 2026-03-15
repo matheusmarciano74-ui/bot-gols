@@ -13,7 +13,6 @@ ODDS_API = "https://api.odds-api.io/v3"
 
 CHECK_INTERVAL = 1800  # 30 min
 LOOKAHEAD_HOURS = 12
-MAX_FIXTURES_SCAN = 120
 
 games_checked = 0
 games_valid = 0
@@ -48,6 +47,7 @@ def send(msg: str):
         return
 
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+
     try:
         requests.post(
             url,
@@ -59,8 +59,15 @@ def send(msg: str):
 
 def football_api(path: str, params: dict):
     headers = {"x-apisports-key": API_FOOTBALL_KEY}
-    r = requests.get(API_FOOTBALL + path, headers=headers, params=params, timeout=30)
+
+    r = requests.get(
+        API_FOOTBALL + path,
+        headers=headers,
+        params=params,
+        timeout=30,
+    )
     r.raise_for_status()
+
     j = r.json()
 
     if j.get("errors"):
@@ -71,8 +78,14 @@ def football_api(path: str, params: dict):
 def odds_api(path: str, params: dict):
     params = dict(params)
     params["apiKey"] = ODDS_API_KEY
-    r = requests.get(ODDS_API + path, params=params, timeout=30)
+
+    r = requests.get(
+        ODDS_API + path,
+        params=params,
+        timeout=30,
+    )
     r.raise_for_status()
+
     return r.json()
 
 def parse_float(v, default=0.0):
@@ -86,7 +99,9 @@ def parse_float(v, default=0.0):
 def norm_text(s: str) -> str:
     if not s:
         return ""
+
     s = s.lower().strip()
+
     repl = {
         " fc": "",
         " cf": "",
@@ -97,8 +112,10 @@ def norm_text(s: str) -> str:
         ",": "",
         "  ": " ",
     }
+
     for a, b in repl.items():
         s = s.replace(a, b)
+
     return " ".join(s.split())
 
 def competition_allowed(country: str, league: str) -> bool:
@@ -115,32 +132,48 @@ def get_upcoming_matches():
     now = datetime.now(timezone.utc)
     limit_dt = now + timedelta(hours=LOOKAHEAD_HOURS)
 
-    data = football_api("/fixtures", {"next": MAX_FIXTURES_SCAN})
+    # pega jogos de hoje e amanhã para cobrir virada de dia
+    dates_to_check = [
+        now.strftime("%Y-%m-%d"),
+        (now + timedelta(days=1)).strftime("%Y-%m-%d"),
+    ]
+
     out = []
 
-    for m in data:
-        league_name = m["league"]["name"]
-        country = m["league"].get("country", "")
+    for day in dates_to_check:
+        data = football_api("/fixtures", {"date": day})
 
-        if not competition_allowed(country, league_name):
-            continue
+        for m in data:
+            league_name = m["league"]["name"]
+            country = m["league"].get("country", "")
 
-        dt = datetime.fromisoformat(m["fixture"]["date"].replace("Z", "+00:00"))
-        if not (now <= dt <= limit_dt):
-            continue
+            if not competition_allowed(country, league_name):
+                continue
 
-        out.append(m)
+            dt = datetime.fromisoformat(
+                m["fixture"]["date"].replace("Z", "+00:00")
+            )
+
+            if not (now <= dt <= limit_dt):
+                continue
+
+            out.append(m)
 
     return out
 
 def get_team_stats(team_id: int, league_id: int, season: int):
     return football_api(
         "/teams/statistics",
-        {"team": team_id, "league": league_id, "season": season},
+        {
+            "team": team_id,
+            "league": league_id,
+            "season": season,
+        },
     )
 
 def score_match(match: dict):
     global games_checked, games_valid
+
     games_checked += 1
 
     home_id = match["teams"]["home"]["id"]
@@ -198,7 +231,14 @@ def score_match(match: dict):
 
 def get_odds_events():
     try:
-        events = odds_api("/events", {"sport": "football", "bookmaker": "Bet365", "limit": 300})
+        events = odds_api(
+            "/events",
+            {
+                "sport": "football",
+                "bookmaker": "Bet365",
+                "limit": 300,
+            },
+        )
         return events if isinstance(events, list) else []
     except Exception:
         return []
@@ -235,13 +275,19 @@ def find_matching_event(home: str, away: str, league_name: str, odds_events: lis
 
 def get_event_odds(event_id):
     try:
-        return odds_api("/odds", {"eventId": event_id, "bookmakers": "Bet365"})
+        return odds_api(
+            "/odds",
+            {
+                "eventId": event_id,
+                "bookmakers": "Bet365",
+            },
+        )
     except Exception:
         return None
 
 def extract_over05_ft(odds_json):
     """
-    Retorna odd real do mercado Over 0.5 FT da partida inteira.
+    Retorna odd real do mercado Over 0.5 FT.
     """
     if not odds_json:
         return None, None
@@ -283,11 +329,15 @@ def extract_over05_ft(odds_json):
                 if not isinstance(item, dict):
                     continue
 
-                txt = " ".join([str(k) + " " + str(v) for k, v in item.items()]).lower()
+                txt = " ".join(
+                    [str(k) + " " + str(v) for k, v in item.items()]
+                ).lower()
+
                 if "over" not in txt or "0.5" not in txt:
                     continue
 
                 odd_val = None
+
                 for k in ["odd", "price", "value", "over", "Over"]:
                     if k in item:
                         odd_val = parse_float(item[k], default=0.0)
@@ -308,10 +358,12 @@ def get_bet365_link_from_event(event):
             return event.get(key)
 
     bookmakers = event.get("bookmakers")
+
     if isinstance(bookmakers, dict):
         for _, data in bookmakers.items():
             if not isinstance(data, dict):
                 continue
+
             for key in ["url", "link", "href", "deeplink", "deepLink"]:
                 if data.get(key):
                     return data.get(key)
@@ -340,6 +392,7 @@ def build_combo():
 
             odds_json = get_event_odds(ev.get("id"))
             odd, market_name = extract_over05_ft(odds_json)
+
             if not odd:
                 continue
 
@@ -348,13 +401,13 @@ def build_combo():
             details["link"] = get_bet365_link_from_event(ev)
 
             rated.append((score, odd, m, details))
+
         except Exception:
             continue
 
-    # prioriza jogos mais fortes e com odd útil
     rated.sort(key=lambda x: (x[0], x[1]), reverse=True)
 
-    # tenta tripla 1.25~1.35
+    # tenta tripla perto de 1.25~1.35
     best_three = None
     for i in range(len(rated)):
         for j in range(i + 1, len(rated)):
@@ -372,7 +425,7 @@ def build_combo():
     if best_three:
         return best_three
 
-    # tenta dupla 1.15~1.28
+    # tenta dupla perto de 1.15~1.28
     best_two = None
     for i in range(len(rated)):
         for j in range(i + 1, len(rated)):
@@ -396,10 +449,12 @@ def combo_signature(combo):
 def format_combo(combo):
     kind = "TRIPLA" if len(combo) == 3 else "DUPLA"
     total_odd = 1.0
+
     lines = [f"🔥 {kind} OVER 0.5 FT\n"]
 
     for _, odd, match, d in combo:
         total_odd *= odd
+
         league = match["league"]["name"]
         country = match["league"].get("country", "")
         home = match["teams"]["home"]["name"]
