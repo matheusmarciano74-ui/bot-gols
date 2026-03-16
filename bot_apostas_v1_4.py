@@ -40,7 +40,7 @@ MAX_CANDIDATOS_ANALISE = 8
 # FILTRO DE LIGAS
 # =========================================================
 
-FILTRO_LIGAS = "MEDIO"
+FILTRO_LIGAS = "OPEN"
 
 LIGAS_TOP = {
     ("England", "Premier League"),
