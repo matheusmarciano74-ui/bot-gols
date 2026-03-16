@@ -1,5 +1,4 @@
 import json
-import math
 import os
 import time
 from datetime import datetime
@@ -21,12 +20,12 @@ TELEGRAM_BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 HEADERS = {"x-apisports-key": API_FOOTBALL_KEY}
 STATE_FILE = "bot_state.json"
 
-INTERVALO_LOOP_SEGUNDOS = 90
+INTERVALO_LOOP_SEGUNDOS = 15
 MINUTO_MIN = 1
 MINUTO_MAX = 25
 
-STAKE_BASE_PCT = 0.15      # 15% da banca
-MAX_LOSS_PCT = 0.25        # 25% da banca no dia
+STAKE_BASE_PCT = 0.15
+MAX_LOSS_PCT = 0.25
 MAX_TENTATIVAS_DIA = 6
 
 BOOKMAKER_PREFERIDO = "Bet365"
@@ -54,20 +53,6 @@ LIGAS_PERMITIDAS = {
     ("Brazil", "Serie B"),
     ("Argentina", "Liga Profesional Argentina"),
 }
-
-PALAVRAS_MATA_MATA = (
-    "playoff",
-    "play-offs",
-    "knockout",
-    "semi-final",
-    "semifinal",
-    "quarter-final",
-    "quarterfinal",
-    "final",
-    "relegation",
-    "promotion",
-    "cup",
-)
 
 # =========================================================
 # ESTADO
@@ -182,11 +167,6 @@ def get_lucro_alvo_base(odd_real):
 
 
 def calcular_stake_sugerida(odd_real):
-    """
-    precisa recuperar:
-    - perda acumulada
-    - lucro alvo da stake base
-    """
     if odd_real <= 1.0:
         return None
 
@@ -201,11 +181,6 @@ def stake_dentro_do_limite(stake):
     perda = float(state["perda_acumulada"])
     restante = round(limite - perda, 2)
     return stake <= restante, restante
-
-
-def is_knockout_round(round_name):
-    rn = (round_name or "").strip().lower()
-    return any(p in rn for p in PALAVRAS_MATA_MATA)
 
 
 def league_allowed(country, league_name):
@@ -298,6 +273,87 @@ def status_text():
     )
 
 
+def debug_resumo():
+    try:
+        data = football_get("/fixtures", params={"live": "all"})
+        resp = data.get("response", [])
+
+        total_live = len(resp)
+        ligas_ok = 0
+        pre_ok = 0
+        standings_ok = 0
+        odds_ok = 0
+
+        exemplos = []
+
+        for fx in resp:
+            try:
+                fixture = fx["fixture"]
+                league = fx["league"]
+                teams = fx["teams"]
+                goals = fx["goals"]
+
+                minute = fixture["status"].get("elapsed") or 0
+                country = league.get("country") or ""
+                league_name = league.get("name") or ""
+                league_id = league.get("id")
+                season = league.get("season")
+
+                if league_allowed(country, league_name):
+                    ligas_ok += 1
+                else:
+                    continue
+
+                total_goals = (goals.get("home") or 0) + (goals.get("away") or 0)
+                if MINUTO_MIN <= minute <= MINUTO_MAX and total_goals == 0:
+                    pre_ok += 1
+                else:
+                    continue
+
+                standings = get_standings_map(league_id, season)
+                if not standings:
+                    continue
+
+                home_id = teams["home"]["id"]
+                away_id = teams["away"]["id"]
+
+                home_row = standings.get(home_id)
+                away_row = standings.get(away_id)
+
+                if home_row and away_row and home_row["is_top_half"] and away_row["is_top_half"]:
+                    standings_ok += 1
+                else:
+                    continue
+
+                odd_real, bookmaker = get_live_over05_odd(fixture["id"])
+                if odd_real and odd_real > 1.01:
+                    odds_ok += 1
+                    exemplos.append(
+                        f"{teams['home']['name']} x {teams['away']['name']} | "
+                        f"{league_name} | min {minute} | odd {odd_real} | {bookmaker}"
+                    )
+
+            except Exception:
+                continue
+
+        msg = (
+            "📊 DEBUG FILTRO\n"
+            f"Jogos ao vivo: {total_live}\n"
+            f"Ligas válidas: {ligas_ok}\n"
+            f"0x0 até 25': {pre_ok}\n"
+            f"Times metade de cima: {standings_ok}\n"
+            f"Com odd live O0.5: {odds_ok}\n"
+        )
+
+        if exemplos:
+            msg += "\nExemplos:\n" + "\n".join(exemplos[:5])
+
+        send_telegram(msg)
+
+    except Exception as e:
+        send_telegram(f"Erro debug: {e}")
+
+
 def handle_command(text):
     global state
     raw = text.strip()
@@ -305,6 +361,10 @@ def handle_command(text):
 
     if t in ("/status", "status", "/ping", "ping"):
         send_telegram(status_text())
+        return
+
+    if t == "/debug":
+        debug_resumo()
         return
 
     if t.startswith("/banca "):
@@ -493,6 +553,58 @@ def get_standings_map(league_id, season):
     return mapping
 
 
+def parse_over05_from_odds_response(data):
+    responses = data.get("response", [])
+    found = []
+
+    for item in responses:
+        bookmakers = item.get("bookmakers", [])
+        for bookmaker in bookmakers:
+            bname = bookmaker.get("name", "")
+            bets = bookmaker.get("bets", [])
+
+            for bet in bets:
+                bet_name = (bet.get("name") or "").lower()
+
+                if (
+                    "over" not in bet_name
+                    and "under" not in bet_name
+                    and "goal" not in bet_name
+                    and "total" not in bet_name
+                ):
+                    continue
+
+                values = bet.get("values", [])
+                for val in values:
+                    label = (val.get("value") or "").lower().replace(" ", "")
+                    odd = val.get("odd")
+
+                    if "over" in label and "0.5" in label:
+                        try:
+                            odd_f = float(str(odd).replace(",", "."))
+                            found.append((bname, odd_f))
+                        except Exception:
+                            continue
+
+    if not found:
+        return None, None
+
+    for bname, odd in found:
+        if bname.strip().lower() == BOOKMAKER_PREFERIDO.lower():
+            return odd, bname
+
+    return found[0][1], found[0][0]
+
+
+def get_live_over05_odd(fixture_id):
+    try:
+        data = football_get("/odds/live", params={"fixture": fixture_id})
+        odd, book = parse_over05_from_odds_response(data)
+        return odd, book
+    except Exception:
+        return None, None
+
+
 def fixture_ok(fx):
     fixture = fx["fixture"]
     league = fx["league"]
@@ -500,16 +612,12 @@ def fixture_ok(fx):
     goals = fx["goals"]
 
     minute = fixture["status"].get("elapsed") or 0
-    round_name = league.get("round") or ""
     country = league.get("country") or ""
     league_name = league.get("name") or ""
     league_id = league.get("id")
     season = league.get("season")
 
     if not league_allowed(country, league_name):
-        return False
-
-    if is_knockout_round(round_name):
         return False
 
     if not (MINUTO_MIN <= minute <= MINUTO_MAX):
@@ -536,63 +644,6 @@ def fixture_ok(fx):
         return False
 
     return True
-
-
-def parse_over05_from_odds_response(data):
-    """
-    Tenta encontrar Over 0.5 em odds/live.
-    Prioriza Bet365.
-    """
-    responses = data.get("response", [])
-    found = []
-
-    for item in responses:
-        bookmakers = item.get("bookmakers", [])
-        for bookmaker in bookmakers:
-            bname = bookmaker.get("name", "")
-            bets = bookmaker.get("bets", [])
-
-            for bet in bets:
-                bet_name = (bet.get("name") or "").lower()
-
-                # pega mercados over/under / goals over under / total goals etc
-                if "over" not in bet_name and "under" not in bet_name and "goal" not in bet_name and "total" not in bet_name:
-                    continue
-
-                values = bet.get("values", [])
-                for val in values:
-                    label = (val.get("value") or "").lower().replace(" ", "")
-                    odd = val.get("odd")
-
-                    # cobre "Over 0.5", "Over0.5", etc.
-                    if "over" in label and "0.5" in label:
-                        try:
-                            odd_f = float(str(odd).replace(",", "."))
-                            found.append((bname, odd_f))
-                        except Exception:
-                            continue
-
-    if not found:
-        return None, None
-
-    # prioriza bet365
-    for bname, odd in found:
-        if bname.strip().lower() == BOOKMAKER_PREFERIDO.lower():
-            return odd, bname
-
-    return found[0][1], found[0][0]
-
-
-def get_live_over05_odd(fixture_id):
-    """
-    Usa a API-Football live odds.
-    """
-    try:
-        data = football_get("/odds/live", params={"fixture": fixture_id})
-        odd, book = parse_over05_from_odds_response(data)
-        return odd, book
-    except Exception:
-        return None, None
 
 
 def fetch_live_candidates():
@@ -640,7 +691,6 @@ def choose_best_fixture(candidates):
 
     sent_today = set(state["sent_fixture_ids_today"])
 
-    # prioridade: odd mais alta, depois minuto maior
     ordered = sorted(
         candidates,
         key=lambda x: (-x["odd_real"], -x["minute"], x["fixture_id"])
@@ -755,8 +805,16 @@ def send_new_bet_alert(fx):
 def loop_principal():
     while True:
         reset_if_new_day()
-        process_updates()
-        maybe_pause_and_alert()
+
+        try:
+            process_updates()
+        except Exception:
+            pass
+
+        try:
+            maybe_pause_and_alert()
+        except Exception:
+            pass
 
         try:
             if can_send_new_alert():
