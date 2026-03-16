@@ -33,14 +33,12 @@ BOOKMAKER_PREFERIDO = "Bet365"
 
 # múltipla
 ODD_MIN_MULTIPLA = 1.80
-MAX_JOGOS_MULTIPLA = 4   # 2, 3 ou 4
+MAX_JOGOS_MULTIPLA = 4
 MAX_CANDIDATOS_ANALISE = 8
 
 # =========================================================
-# FILTRO DE LIGAS
+# LIGAS
 # =========================================================
-
-FILTRO_LIGAS = "OPEN"
 
 LIGAS_TOP = {
     ("England", "Premier League"),
@@ -73,21 +71,6 @@ LIGAS_MEDIAS = {
     ("South-Korea", "K League 1"),
 }
 
-def league_allowed(country, league_name):
-
-    if FILTRO_LIGAS == "OPEN":
-        return True
-
-    if FILTRO_LIGAS == "TOP":
-        return (country, league_name) in LIGAS_TOP
-
-    if FILTRO_LIGAS == "MEDIO":
-        return (
-            (country, league_name) in LIGAS_TOP
-            or (country, league_name) in LIGAS_MEDIAS
-        )
-
-    return False
 # =========================================================
 # ESTADO
 # =========================================================
@@ -113,6 +96,7 @@ def default_state():
         "pending_bet": None,
         "sent_keys_today": [],
         "last_limit_alert_day": "",
+        "modo_ligas": "MEDIO",
     }
 
 
@@ -136,8 +120,10 @@ def load_state():
 
     if state.get("day") != hoje_str():
         banca = state.get("banca_inicial")
+        modo_ligas = state.get("modo_ligas", "MEDIO")
         state = default_state()
         state["banca_inicial"] = banca
+        state["modo_ligas"] = modo_ligas
         save_state(state)
 
     return state
@@ -162,8 +148,10 @@ def reset_if_new_day():
     global state
     if state.get("day") != hoje_str():
         banca = state.get("banca_inicial")
+        modo_ligas = state.get("modo_ligas", "MEDIO")
         state = default_state()
         state["banca_inicial"] = banca
+        state["modo_ligas"] = modo_ligas
         save_state(state)
 
 
@@ -238,7 +226,21 @@ def stake_dentro_do_limite(stake):
 
 
 def league_allowed(country, league_name):
-    return (country, league_name) in LIGAS_PERMITIDAS
+    modo = state.get("modo_ligas", "MEDIO")
+
+    if modo == "OPEN":
+        return True
+
+    if modo == "TOP":
+        return (country, league_name) in LIGAS_TOP
+
+    if modo == "MEDIO":
+        return (
+            (country, league_name) in LIGAS_TOP
+            or (country, league_name) in LIGAS_MEDIAS
+        )
+
+    return False
 
 
 # =========================================================
@@ -313,11 +315,45 @@ def status_text():
         f"Stake base (15%): {fmt_money(get_stake_base())}\n"
         f"Limite perda dia (25%): {fmt_money(get_limite_loss())}\n"
         f"Perda acumulada: {fmt_money(state['perda_acumulada'])}\n"
+        f"Modo ligas: {state.get('modo_ligas', 'MEDIO')}\n"
         f"Múltipla pendente: {pendente}\n"
         f"Odd pendente: {odd_reg}\n"
         f"Stake registrada: {stake_reg}\n"
         f"Pausado: {state['paused']}"
     )
+
+
+def listar_jogos():
+    try:
+        data = football_get("/fixtures", params={"live": "all"})
+        resp = data.get("response", [])
+
+        if not resp:
+            send_telegram("⚠️ Nenhum jogo ao vivo no momento.")
+            return
+
+        linhas = []
+
+        for fx in resp[:15]:
+            minute = fx["fixture"]["status"].get("elapsed") or 0
+            home = fx["teams"]["home"]["name"]
+            away = fx["teams"]["away"]["name"]
+            league = fx["league"]["name"]
+            country = fx["league"]["country"]
+            gols_home = fx["goals"]["home"] or 0
+            gols_away = fx["goals"]["away"] or 0
+
+            linhas.append(
+                f"{home} x {away}\n"
+                f"{country} - {league}\n"
+                f"Min: {minute} | Placar: {gols_home}-{gols_away}"
+            )
+
+        msg = "⚽ Jogos ao vivo analisados:\n\n" + "\n\n".join(linhas)
+        send_telegram(msg)
+
+    except Exception as e:
+        send_telegram(f"Erro ao listar jogos: {e}")
 
 
 def handle_command(text):
@@ -331,6 +367,29 @@ def handle_command(text):
 
     if t == "/debug":
         debug_resumo()
+        return
+
+    if t == "/jogos":
+        listar_jogos()
+        return
+
+    if t.startswith("/ligas"):
+        partes = raw.split()
+
+        if len(partes) == 1:
+            modo = state.get("modo_ligas", "MEDIO")
+            send_telegram(f"⚙️ Modo atual de ligas: {modo}")
+            return
+
+        modo = partes[1].upper()
+
+        if modo not in ("TOP", "MEDIO", "OPEN"):
+            send_telegram("Use:\n/ligas TOP\n/ligas MEDIO\n/ligas OPEN")
+            return
+
+        state["modo_ligas"] = modo
+        save_state(state)
+        send_telegram(f"✅ Modo de ligas alterado para: {modo}")
         return
 
     if t.startswith("/banca "):
@@ -358,8 +417,10 @@ def handle_command(text):
 
     if t == "/resetday":
         banca = state.get("banca_inicial")
+        modo_ligas = state.get("modo_ligas", "MEDIO")
         state = default_state()
         state["banca_inicial"] = banca
+        state["modo_ligas"] = modo_ligas
         save_state(state)
         send_telegram("✅ Dia resetado.")
         return
@@ -613,15 +674,12 @@ def fixture_ok(fx):
     if not home_row or not away_row:
         return False
 
-    # pelo menos 1 time acima da metade
     if not (home_row["is_top_half"] or away_row["is_top_half"]):
         return False
 
-    # pelo menos 1 ofensivo
     if not (home_row["gf_avg"] >= 1.40 or away_row["gf_avg"] >= 1.40):
         return False
 
-    # média total do confronto
     media_total_confronto = round(
         (home_row["total_avg"] + away_row["total_avg"]) / 2.0, 2
     )
