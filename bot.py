@@ -1,4 +1,4 @@
-from bot_apostas_v1_3 import rodar
+from bot_apostas_v1_4 import loop_principal
 
 if __name__ == "__main__":
-    rodar()
+    loop_principal()
