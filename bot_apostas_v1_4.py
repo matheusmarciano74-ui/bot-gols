@@ -31,10 +31,13 @@ MAX_TENTATIVAS_DIA = 6
 
 BOOKMAKER_PREFERIDO = "Bet365"
 
-# múltipla
 ODD_MIN_MULTIPLA = 1.80
 MAX_JOGOS_MULTIPLA = 4
 MAX_CANDIDATOS_ANALISE = 8
+
+# fallback quando odd não vier
+PERMITIR_ALERTA_SEM_ODD = True
+ODD_FALLBACK_MANUAL = 1.40
 
 # =========================================================
 # LIGAS
@@ -242,7 +245,6 @@ def league_allowed(country, league_name):
 
     return False
 
-
 # =========================================================
 # TELEGRAM
 # =========================================================
@@ -301,7 +303,10 @@ def status_text():
     odd_reg = "-"
 
     if pb:
-        jogos_txt = " | ".join([f"{j['home']} x {j['away']}" for j in pb["jogos"]])
+        if pb.get("type") == "manual":
+            jogos_txt = f"{pb['jogos'][0]['home']} x {pb['jogos'][0]['away']}"
+        else:
+            jogos_txt = " | ".join([f"{j['home']} x {j['away']}" for j in pb["jogos"]])
         pendente = jogos_txt
         if pb.get("stake") is not None:
             stake_reg = fmt_money(pb["stake"])
@@ -316,7 +321,7 @@ def status_text():
         f"Limite perda dia (25%): {fmt_money(get_limite_loss())}\n"
         f"Perda acumulada: {fmt_money(state['perda_acumulada'])}\n"
         f"Modo ligas: {state.get('modo_ligas', 'MEDIO')}\n"
-        f"Múltipla pendente: {pendente}\n"
+        f"Pendente: {pendente}\n"
         f"Odd pendente: {odd_reg}\n"
         f"Stake registrada: {stake_reg}\n"
         f"Pausado: {state['paused']}"
@@ -429,14 +434,14 @@ def handle_command(text):
         if state["pending_bet"]:
             state["pending_bet"] = None
             save_state(state)
-            send_telegram("⏭ Múltipla pendente removida.")
+            send_telegram("⏭ Pendente removido.")
         else:
-            send_telegram("ℹ️ Não há múltipla pendente.")
+            send_telegram("ℹ️ Não há pendente.")
         return
 
     if t == "/win":
         if state["pending_bet"] is None:
-            send_telegram("ℹ️ Não há múltipla pendente para WIN.")
+            send_telegram("ℹ️ Não há pendente para WIN.")
             return
 
         state["ciclo_ativo"] = False
@@ -450,7 +455,7 @@ def handle_command(text):
 
     if t == "/loss":
         if state["pending_bet"] is None:
-            send_telegram("ℹ️ Não há múltipla pendente para LOSS.")
+            send_telegram("ℹ️ Não há pendente para LOSS.")
             return
 
         stake = float(state["pending_bet"].get("stake") or 0.0)
@@ -477,14 +482,14 @@ def handle_command(text):
         if state["paused"]:
             msg += "🚫 Ciclo pausado por limite diário. Use /resetday."
         else:
-            msg += "➡️ Bot aguardando nova múltipla."
+            msg += "➡️ Bot aguardando nova entrada."
 
         send_telegram(msg)
         return
 
     if is_number(raw):
         if state["pending_bet"] is None:
-            send_telegram("ℹ️ Não há múltipla pendente para registrar aposta.")
+            send_telegram("ℹ️ Não há pendente para registrar aposta.")
             return
 
         stake = round(float(raw.replace(",", ".")), 2)
@@ -499,9 +504,8 @@ def handle_command(text):
 
         send_telegram(
             "✅ Aposta registrada\n"
-            f"Qtd. jogos: {len(state['pending_bet']['jogos'])}\n"
             f"Aposta: {fmt_money(stake)}\n"
-            f"Odd total: {odd}\n"
+            f"Odd usada: {odd}\n"
             f"Retorno bruto: {fmt_money(bruto)}\n"
             f"Lucro líquido: {fmt_money(lucro)}\n\n"
             "Depois mande:\n/win  ou  /loss"
@@ -522,7 +526,6 @@ def process_updates():
             continue
 
         handle_command(text)
-
 
 # =========================================================
 # API FOOTBALL
@@ -707,8 +710,6 @@ def fetch_live_candidates():
             league_name = fx["league"]["name"]
 
             odd_real, bookmaker = get_live_over05_odd(fixture_id)
-            if odd_real is None or odd_real <= 1.01:
-                continue
 
             candidates.append({
                 "fixture_id": fixture_id,
@@ -717,7 +718,7 @@ def fetch_live_candidates():
                 "minute": minute,
                 "country": country,
                 "league_name": league_name,
-                "odd_real": round(float(odd_real), 3),
+                "odd_real": round(float(odd_real), 3) if odd_real else None,
                 "bookmaker": bookmaker or "-",
                 "google_link": build_google_link(home, away),
                 "bet365_search_link": build_bet365_search_link(home, away),
@@ -729,13 +730,14 @@ def fetch_live_candidates():
 
 
 def choose_best_multiple(candidates):
-    if not candidates:
+    validos = [c for c in candidates if c.get("odd_real") and c["odd_real"] > 1.01]
+    if not validos:
         return None
 
     sent_today = set(state["sent_keys_today"])
 
     ordered = sorted(
-        candidates,
+        validos,
         key=lambda x: (-x["odd_real"], -x["minute"], x["fixture_id"])
     )[:MAX_CANDIDATOS_ANALISE]
 
@@ -780,6 +782,22 @@ def choose_best_multiple(candidates):
             break
 
     return melhor
+
+
+def choose_manual_candidate(candidates):
+    pendentes = set(state["sent_keys_today"])
+    ordered = sorted(
+        candidates,
+        key=lambda x: (-x["minute"], x["fixture_id"])
+    )
+
+    for c in ordered:
+        key = f"manual_{c['fixture_id']}"
+        if key in pendentes:
+            continue
+        return c
+
+    return None
 
 
 def debug_resumo():
@@ -858,8 +876,6 @@ def debug_resumo():
                         f"{teams['home']['name']} x {teams['away']['name']} | "
                         f"{league_name} | min {minute} | "
                         f"odd {odd_real} | "
-                        f"GFavg {home_row['gf_avg']}/{away_row['gf_avg']} | "
-                        f"TotAvg {media_total_confronto} | "
                         f"{bookmaker}"
                     )
             except Exception:
@@ -882,9 +898,8 @@ def debug_resumo():
     except Exception as e:
         send_telegram(f"Erro debug: {e}")
 
-
 # =========================================================
-# ALERTA
+# ALERTAS
 # =========================================================
 
 def can_send_new_alert():
@@ -982,6 +997,62 @@ def send_new_bet_alert(mult):
     return True
 
 
+def send_manual_alert(cand):
+    odd_total = ODD_FALLBACK_MANUAL
+    stake_sugerida = calcular_stake_sugerida(odd_total)
+    if stake_sugerida is None:
+        return False
+
+    ok_limite, restante = stake_dentro_do_limite(stake_sugerida)
+
+    if not ok_limite:
+        state["paused"] = True
+        save_state(state)
+        send_telegram(
+            "🚫 Entrada manual bloqueada por limite diário.\n"
+            f"Stake necessária: {fmt_money(stake_sugerida)}\n"
+            f"Restante do limite diário: {fmt_money(restante)}"
+        )
+        return False
+
+    key = f"manual_{cand['fixture_id']}"
+
+    msg = (
+        "⚠️ JOGO BOM ENCONTRADO (SEM ODD LIVE NA API)\n"
+        f"{cand['home']} x {cand['away']}\n"
+        f"{cand['league_name']} - {cand['country']}\n"
+        f"Minuto: {cand['minute']}\n\n"
+        f"Stake sugerida: {fmt_money(stake_sugerida)}\n"
+        f"Odd estimada provisória: {ODD_FALLBACK_MANUAL}\n\n"
+        "Confere a odd manualmente na casa e, se entrar, digite o valor da aposta.\n\n"
+        f"Bet365:\n{cand['bet365_search_link']}\n\n"
+        f"Google:\n{cand['google_link']}"
+    )
+
+    ok = send_telegram(msg)
+    if not ok:
+        return False
+
+    state["pending_bet"] = {
+        "type": "manual",
+        "qtd": 1,
+        "odd_total": odd_total,
+        "stake_sugerida": stake_sugerida,
+        "jogos": [cand],
+        "stake": None,
+        "retorno_bruto": None,
+        "lucro_alvo": None,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "key": key,
+    }
+
+    keys = list(state["sent_keys_today"])
+    keys.append(key)
+    state["sent_keys_today"] = keys[-200:]
+    state["ciclo_ativo"] = True
+    save_state(state)
+    return True
+
 # =========================================================
 # LOOP
 # =========================================================
@@ -1003,9 +1074,14 @@ def loop_principal():
         try:
             if can_send_new_alert():
                 candidates = fetch_live_candidates()
+
                 best = choose_best_multiple(candidates)
                 if best:
                     send_new_bet_alert(best)
+                elif PERMITIR_ALERTA_SEM_ODD:
+                    manual = choose_manual_candidate(candidates)
+                    if manual:
+                        send_manual_alert(manual)
         except Exception:
             pass
 
