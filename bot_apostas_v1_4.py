@@ -37,19 +37,24 @@ MAX_JOGOS_MULTIPLA = 4   # 2, 3 ou 4
 MAX_CANDIDATOS_ANALISE = 8
 
 # =========================================================
-# LIGAS
+# FILTRO DE LIGAS
 # =========================================================
 
-LIGAS_PERMITIDAS = {
+FILTRO_LIGAS = "MEDIO"
+
+LIGAS_TOP = {
     ("England", "Premier League"),
-    ("England", "Championship"),
     ("Spain", "La Liga"),
-    ("Spain", "Segunda División"),
     ("Italy", "Serie A"),
-    ("Italy", "Serie B"),
     ("Germany", "Bundesliga"),
-    ("Germany", "2. Bundesliga"),
     ("France", "Ligue 1"),
+}
+
+LIGAS_MEDIAS = {
+    ("England", "Championship"),
+    ("Spain", "Segunda División"),
+    ("Italy", "Serie B"),
+    ("Germany", "2. Bundesliga"),
     ("France", "Ligue 2"),
     ("Portugal", "Primeira Liga"),
     ("Netherlands", "Eredivisie"),
@@ -58,8 +63,31 @@ LIGAS_PERMITIDAS = {
     ("Brazil", "Serie A"),
     ("Brazil", "Serie B"),
     ("Argentina", "Liga Profesional Argentina"),
+    ("Scotland", "Premiership"),
+    ("Austria", "Bundesliga"),
+    ("Switzerland", "Super League"),
+    ("Denmark", "Superliga"),
+    ("Sweden", "Allsvenskan"),
+    ("Norway", "Eliteserien"),
+    ("Japan", "J1 League"),
+    ("South-Korea", "K League 1"),
 }
 
+def league_allowed(country, league_name):
+
+    if FILTRO_LIGAS == "OPEN":
+        return True
+
+    if FILTRO_LIGAS == "TOP":
+        return (country, league_name) in LIGAS_TOP
+
+    if FILTRO_LIGAS == "MEDIO":
+        return (
+            (country, league_name) in LIGAS_TOP
+            or (country, league_name) in LIGAS_MEDIAS
+        )
+
+    return False
 # =========================================================
 # ESTADO
 # =========================================================
