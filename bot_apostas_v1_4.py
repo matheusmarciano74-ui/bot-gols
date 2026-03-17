@@ -23,7 +23,6 @@ STATE_FILE = "bot_state.json"
 
 INTERVALO_LOOP_SEGUNDOS = 15
 MINUTO_MIN = 1
-MINUTO_MAX = 25
 
 STAKE_BASE_PCT = 0.15
 MAX_LOSS_PCT = 0.25
@@ -31,7 +30,6 @@ MAX_TENTATIVAS_DIA = 6
 
 BOOKMAKER_PREFERIDO = "Bet365"
 
-ODD_MIN_MULTIPLA = 1.80
 MAX_JOGOS_MULTIPLA = 4
 MAX_CANDIDATOS_ANALISE = 8
 
@@ -100,6 +98,8 @@ def default_state():
         "sent_keys_today": [],
         "last_limit_alert_day": "",
         "modo_ligas": "MEDIO",
+        "odd_alvo": 1.30,
+        "minuto_max": 25,
     }
 
 
@@ -124,9 +124,14 @@ def load_state():
     if state.get("day") != hoje_str():
         banca = state.get("banca_inicial")
         modo_ligas = state.get("modo_ligas", "MEDIO")
+        odd_alvo = state.get("odd_alvo", 1.30)
+        minuto_max = state.get("minuto_max", 25)
+
         state = default_state()
         state["banca_inicial"] = banca
         state["modo_ligas"] = modo_ligas
+        state["odd_alvo"] = odd_alvo
+        state["minuto_max"] = minuto_max
         save_state(state)
 
     return state
@@ -152,9 +157,14 @@ def reset_if_new_day():
     if state.get("day") != hoje_str():
         banca = state.get("banca_inicial")
         modo_ligas = state.get("modo_ligas", "MEDIO")
+        odd_alvo = state.get("odd_alvo", 1.30)
+        minuto_max = state.get("minuto_max", 25)
+
         state = default_state()
         state["banca_inicial"] = banca
         state["modo_ligas"] = modo_ligas
+        state["odd_alvo"] = odd_alvo
+        state["minuto_max"] = minuto_max
         save_state(state)
 
 
@@ -245,6 +255,7 @@ def league_allowed(country, league_name):
 
     return False
 
+
 # =========================================================
 # TELEGRAM
 # =========================================================
@@ -321,6 +332,8 @@ def status_text():
         f"Limite perda dia (25%): {fmt_money(get_limite_loss())}\n"
         f"Perda acumulada: {fmt_money(state['perda_acumulada'])}\n"
         f"Modo ligas: {state.get('modo_ligas', 'MEDIO')}\n"
+        f"Odd alvo: {state.get('odd_alvo', 1.30)}\n"
+        f"Minuto máximo: {state.get('minuto_max', 25)}\n"
         f"Pendente: {pendente}\n"
         f"Odd pendente: {odd_reg}\n"
         f"Stake registrada: {stake_reg}\n"
@@ -397,6 +410,38 @@ def handle_command(text):
         send_telegram(f"✅ Modo de ligas alterado para: {modo}")
         return
 
+    if t.startswith("/odd "):
+        valor_txt = raw.split(" ", 1)[1].strip().replace(",", ".")
+        if not is_number(valor_txt):
+            send_telegram("❌ Use assim: /odd 1.30")
+            return
+
+        odd_alvo = round(float(valor_txt), 2)
+        if odd_alvo < 1.05:
+            send_telegram("❌ Odd alvo muito baixa. Use algo como /odd 1.30")
+            return
+
+        state["odd_alvo"] = odd_alvo
+        save_state(state)
+        send_telegram(f"✅ Odd alvo alterada para: {odd_alvo}")
+        return
+
+    if t.startswith("/minmax "):
+        valor_txt = raw.split(" ", 1)[1].strip()
+        if not valor_txt.isdigit():
+            send_telegram("❌ Use assim: /minmax 35")
+            return
+
+        minuto = int(valor_txt)
+        if minuto < 5 or minuto > 60:
+            send_telegram("❌ Use um valor entre 5 e 60.")
+            return
+
+        state["minuto_max"] = minuto
+        save_state(state)
+        send_telegram(f"✅ Minuto máximo alterado para: {minuto}")
+        return
+
     if t.startswith("/banca "):
         valor_txt = raw.split(" ", 1)[1].strip().replace(",", ".")
         if not is_number(valor_txt):
@@ -423,9 +468,14 @@ def handle_command(text):
     if t == "/resetday":
         banca = state.get("banca_inicial")
         modo_ligas = state.get("modo_ligas", "MEDIO")
+        odd_alvo = state.get("odd_alvo", 1.30)
+        minuto_max = state.get("minuto_max", 25)
+
         state = default_state()
         state["banca_inicial"] = banca
         state["modo_ligas"] = modo_ligas
+        state["odd_alvo"] = odd_alvo
+        state["minuto_max"] = minuto_max
         save_state(state)
         send_telegram("✅ Dia resetado.")
         return
@@ -654,10 +704,12 @@ def fixture_ok(fx):
     league_id = league.get("id")
     season = league.get("season")
 
+    minuto_max = int(state.get("minuto_max", 25))
+
     if not league_allowed(country, league_name):
         return False
 
-    if not (MINUTO_MIN <= minute <= MINUTO_MAX):
+    if not (MINUTO_MIN <= minute <= minuto_max):
         return False
 
     total_goals = (goals.get("home") or 0) + (goals.get("away") or 0)
@@ -735,6 +787,7 @@ def choose_best_multiple(candidates):
         return None
 
     sent_today = set(state["sent_keys_today"])
+    odd_alvo = float(state.get("odd_alvo", 1.30))
 
     ordered = sorted(
         validos,
@@ -742,7 +795,7 @@ def choose_best_multiple(candidates):
     )[:MAX_CANDIDATOS_ANALISE]
 
     max_n = min(MAX_JOGOS_MULTIPLA, len(ordered))
-    min_n = 2
+    min_n = 1
 
     melhor = None
 
@@ -754,7 +807,7 @@ def choose_best_multiple(candidates):
 
             odd_total = calc_combined_odd(combo)
 
-            if odd_total < ODD_MIN_MULTIPLA:
+            if odd_total < odd_alvo:
                 continue
 
             media_min = round(sum(c["minute"] for c in combo) / len(combo), 2)
@@ -813,6 +866,7 @@ def debug_resumo():
         odds_ok = 0
 
         exemplos = []
+        minuto_max = int(state.get("minuto_max", 25))
 
         for fx in resp:
             try:
@@ -833,7 +887,7 @@ def debug_resumo():
                     continue
 
                 total_goals = (goals.get("home") or 0) + (goals.get("away") or 0)
-                if MINUTO_MIN <= minute <= MINUTO_MAX and total_goals == 0:
+                if MINUTO_MIN <= minute <= minuto_max and total_goals == 0:
                     pre_ok += 1
                 else:
                     continue
@@ -885,7 +939,7 @@ def debug_resumo():
             "📊 DEBUG FILTRO\n"
             f"Jogos ao vivo: {total_live}\n"
             f"Ligas válidas: {ligas_ok}\n"
-            f"0x0 até 25': {pre_ok}\n"
+            f"0x0 até {minuto_max}': {pre_ok}\n"
             f"1 time top-half: {top_half_ok}\n"
             f"Perfil ofensivo: {ofensivo_ok}\n"
             f"Com odd live O0.5: {odds_ok}\n"
@@ -964,6 +1018,7 @@ def send_new_bet_alert(mult):
     msg = (
         f"🚨 MÚLTIPLA ENCONTRADA ({mult['qtd']} jogos)\n"
         f"Odd total: {odd_total}\n"
+        f"Odd alvo: {state.get('odd_alvo', 1.30)}\n"
         f"Stake sugerida: {fmt_money(stake_sugerida)}\n"
         f"Stake base (15%): {fmt_money(get_stake_base())}\n"
         f"Limite perda dia (25%): {fmt_money(get_limite_loss())}\n"
@@ -1021,7 +1076,8 @@ def send_manual_alert(cand):
         "⚠️ JOGO BOM ENCONTRADO (SEM ODD LIVE NA API)\n"
         f"{cand['home']} x {cand['away']}\n"
         f"{cand['league_name']} - {cand['country']}\n"
-        f"Minuto: {cand['minute']}\n\n"
+        f"Minuto: {cand['minute']}\n"
+        f"Odd alvo configurada: {state.get('odd_alvo', 1.30)}\n\n"
         f"Stake sugerida: {fmt_money(stake_sugerida)}\n"
         f"Odd estimada provisória: {ODD_FALLBACK_MANUAL}\n\n"
         "Confere a odd manualmente na casa e, se entrar, digite o valor da aposta.\n\n"
