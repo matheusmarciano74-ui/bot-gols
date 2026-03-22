@@ -9,8 +9,8 @@ from datetime import datetime, timedelta, timezone
 # CONFIG
 # =========================================================
 
-TELEGRAM_BOT_TOKEN = "SEU_TOKEN_AQUI"
-TELEGRAM_CHAT_ID = "SEU_CHAT_ID_AQUI"
+TELEGRAM_BOT_TOKEN = os.getenv("BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("CHAT_ID")
 
 SCAN_INTERVAL_SECONDS = 60
 MAX_SIGNALS_PER_DAY = 12
