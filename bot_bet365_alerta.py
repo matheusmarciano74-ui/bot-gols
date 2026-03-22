@@ -183,7 +183,8 @@ def callbacks(data):
     elif data == "stop":
         state["ativo"] = False
     elif data == "sniper":
-        state["modo"] = "SNIPER"
+    state["modo"] = "SNIPER"
+    send("🎯 Modo SNIPER ativado")
     elif data == "volume":
     state["modo"] = "VOLUME"
     send("🚀 Modo VOLUME ativado")
