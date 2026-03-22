@@ -6,8 +6,6 @@ import requests
 import os
 from datetime import datetime, timedelta, timezone
 
-send_telegram_message("🚀 TESTE DIRETO - se chegou, Telegram tá OK")
-
 # =========================================================
 # CONFIG
 # =========================================================
@@ -648,6 +646,7 @@ def analyze_and_send():
 
 def main():
     init_db()
+    send_telegram_message("🚀 TESTE DIRETO - se chegou, Telegram tá OK")
     send_telegram_message("✅ Bot de alertas iniciado com sucesso.")
     print("[BOT] Iniciado.")
 
