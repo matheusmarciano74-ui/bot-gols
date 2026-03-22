@@ -178,60 +178,99 @@ def alerta(j):
 # ================= CALLBACK =================
 
 def callbacks(data):
+
     if data == "start":
         state["ativo"] = True
+        save(state)
+        send("🟢 Bot ATIVADO")
+
     elif data == "stop":
         state["ativo"] = False
+        save(state)
+        send("🔴 Bot PAUSADO")
+
     elif data == "sniper":
-    state["modo"] = "SNIPER"
-    send("🎯 Modo SNIPER ativado")
+        state["modo"] = "SNIPER"
+        save(state)
+        send("🎯 Modo SNIPER ativado")
+
     elif data == "volume":
-    state["modo"] = "VOLUME"
-    send("🚀 Modo VOLUME ativado")
+        state["modo"] = "VOLUME"
+        save(state)
+        send("🚀 Modo VOLUME ativado")
 
     elif data == "ligas":
-        send("🌍 Escolha:", [
+        send("🌍 Escolha as ligas:", [
             [{"text": "TOP", "callback_data": "liga_top"}],
             [{"text": "MEDIO", "callback_data": "liga_medio"}],
             [{"text": "OPEN", "callback_data": "liga_open"}],
         ])
-        return
 
     elif data == "liga_top":
         state["ligas"] = "TOP"
+        save(state)
+        send("🌍 Ligas: TOP")
+
     elif data == "liga_medio":
         state["ligas"] = "MEDIO"
+        save(state)
+        send("🌍 Ligas: MEDIO")
+
     elif data == "liga_open":
         state["ligas"] = "OPEN"
+        save(state)
+        send("🌍 Ligas: OPEN")
 
     elif data == "config":
-        send("⚙️ Config:", [
+        send("⚙️ Configuração:", [
             [{"text": "Odd 1.20", "callback_data": "odd_120"},
              {"text": "Odd 1.40", "callback_data": "odd_140"}],
             [{"text": "Min 30", "callback_data": "min_30"},
              {"text": "Min 45", "callback_data": "min_45"}],
         ])
-        return
 
     elif data == "odd_120":
         state["odd_min"] = 1.20
+        save(state)
+        send("💸 Odd mínima: 1.20")
+
     elif data == "odd_140":
         state["odd_min"] = 1.40
+        save(state)
+        send("💸 Odd mínima: 1.40")
 
     elif data == "min_30":
         state["minuto_max"] = 30
+        save(state)
+        send("⏱ Minuto máximo: 30")
+
     elif data == "min_45":
         state["minuto_max"] = 45
+        save(state)
+        send("⏱ Minuto máximo: 45")
 
     elif data.startswith("bet"):
-        _, h, a, o = data.split("|")
-        state["pendente"] = {"home": h, "away": a, "odd": float(o), "status": "wait"}
-        send("💰 Digite valor")
+        _, home, away, odd = data.split("|")
+
+        state["pendente"] = {
+            "home": home,
+            "away": away,
+            "odd": float(odd),
+            "status": "wait"
+        }
+
+        save(state)
+        send("💰 Digite o valor da aposta")
+
+    elif data == "skip":
+        send("👍 Ignorado")
 
     elif data == "historico":
-        send(f"📊 Total apostas: {len(state['historico'])}")
+        total = len(state.get("historico", []))
+        send(f"📊 Total de apostas: {total}")
 
-    save(state)
+    elif data == "status":
+        painel()
 
 # ================= TEXTO =================
 
