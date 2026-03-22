@@ -21,6 +21,19 @@ INTERVALO = 20
 STATE_FILE = "state.json"
 
 # =========================================================
+# LIGAS
+# =========================================================
+
+LIGAS_TOP = {
+    ("England", "Premier League"),
+    ("Spain", "La Liga"),
+    ("Italy", "Serie A"),
+    ("Germany", "Bundesliga"),
+    ("France", "Ligue 1"),
+    ("Brazil", "Serie A"),
+}
+
+# =========================================================
 # STATE
 # =========================================================
 
@@ -28,7 +41,11 @@ def default_state():
     return {
         "modo_operacao": "SNIPER",
         "paused": False,
-        "enviados": []
+        "enviados": [],
+        "odd_min": 1.20,
+        "minuto_min": 10,
+        "minuto_max": 35,
+        "modo_ligas": "MEDIO",
     }
 
 
@@ -85,7 +102,7 @@ def get_updates():
 
 
 # =========================================================
-# COMANDOS TELEGRAM
+# COMANDOS
 # =========================================================
 
 def handle_command(text):
@@ -103,6 +120,33 @@ def handle_command(text):
         send_telegram("🚀 Modo VOLUME ativado")
         return
 
+    if t.startswith("/odd "):
+        try:
+            val = float(t.split()[1])
+            state["odd_min"] = val
+            save_state(state)
+            send_telegram(f"💸 Odd mínima agora: {val}")
+        except:
+            send_telegram("❌ Use /odd 1.50")
+        return
+
+    if t.startswith("/min "):
+        try:
+            val = int(t.split()[1])
+            state["minuto_max"] = val
+            save_state(state)
+            send_telegram(f"⏱ Minuto máximo: {val}")
+        except:
+            send_telegram("❌ Use /min 30")
+        return
+
+    if t.startswith("/ligas "):
+        modo = t.split()[1].upper()
+        state["modo_ligas"] = modo
+        save_state(state)
+        send_telegram(f"🌍 Ligas: {modo}")
+        return
+
     if t == "/stop":
         state["paused"] = True
         save_state(state)
@@ -117,7 +161,12 @@ def handle_command(text):
 
     if t == "/status":
         send_telegram(
-            f"🤖 STATUS\nModo: {state['modo_operacao']}\nPausado: {state['paused']}"
+            f"🤖 STATUS\n"
+            f"Modo: {state['modo_operacao']}\n"
+            f"Pausado: {state['paused']}\n"
+            f"Odd min: {state['odd_min']}\n"
+            f"Minuto máx: {state['minuto_max']}\n"
+            f"Ligas: {state['modo_ligas']}"
         )
 
 
@@ -159,7 +208,7 @@ def get_odd(fixture_id):
 
                         if "over" in label and "0.5" in label:
                             odd = float(v.get("odd"))
-                            if odd > 1.20:
+                            if odd >= state["odd_min"]:
                                 return round(odd, 2), book.get("name")
 
     except:
@@ -172,23 +221,30 @@ def get_odd(fixture_id):
 # FILTRO
 # =========================================================
 
+def liga_ok(country, league):
+    if state["modo_ligas"] == "OPEN":
+        return True
+
+    if state["modo_ligas"] == "TOP":
+        return (country, league) in LIGAS_TOP
+
+    return True
+
+
 def jogo_valido(fx):
     minute = fx["fixture"]["status"].get("elapsed") or 0
     goals = (fx["goals"]["home"] or 0) + (fx["goals"]["away"] or 0)
+    country = fx["league"]["country"]
+    league = fx["league"]["name"]
 
-    modo = state["modo_operacao"]
+    if not liga_ok(country, league):
+        return False
 
-    if modo == "SNIPER":
-        if minute < 15 or minute > 35:
-            return False
-        if goals > 1:
-            return False
+    if minute < state["minuto_min"] or minute > state["minuto_max"]:
+        return False
 
-    if modo == "VOLUME":
-        if minute < 10 or minute > 45:
-            return False
-        if goals > 2:
-            return False
+    if goals > 1:
+        return False
 
     return True
 
@@ -247,10 +303,9 @@ def enviar_alerta(j):
         f"⏱ {j['minute']}'\n\n"
         f"🎯 Over 0.5 HT\n"
         f"💸 Odd: {j['odd']} ({j['book']})\n\n"
-        f"📲 AÇÃO RÁPIDA:\n"
+        f"📲 AÇÃO:\n"
         f"1. Abra a bet365\n"
-        f"2. Pesquise:\n"
-        f"{j['home']} x {j['away']}\n"
+        f"2. Pesquise o jogo\n"
         f"3. Entre em Over 0.5 HT\n\n"
         f"🔎 {link}\n\n"
         f"⚠️ Stake: 2%"
@@ -260,7 +315,7 @@ def enviar_alerta(j):
 
 
 # =========================================================
-# MAIN (IMPORTANTE)
+# MAIN
 # =========================================================
 
 def main():
@@ -284,10 +339,6 @@ def main():
 
         time.sleep(INTERVALO)
 
-
-# =========================================================
-# START
-# =========================================================
 
 if __name__ == "__main__":
     main()
