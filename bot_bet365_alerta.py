@@ -263,7 +263,11 @@ def loop_telegram():
     while True:
         for u in updates():
             if "callback_query" in u:
-                callbacks(u["callback_query"]["data"])
+                cb = u["callback_query"]
+
+                answer_callback(cb["id"])  # 🔥 ESSENCIAL
+
+                callbacks(cb["data"])
 
             if "message" in u:
                 if str(u["message"]["chat"]["id"]) != str(CHAT_ID):
