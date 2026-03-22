@@ -1,6 +1,8 @@
 import json
 import os
 import time
+import threading
+from datetime import datetime
 from urllib.parse import quote_plus
 import requests
 
@@ -8,7 +10,7 @@ import requests
 
 API_KEY = os.getenv("API_FOOTBALL_KEY")
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+CHAT_ID = str(os.getenv("TELEGRAM_CHAT_ID"))
 
 BASE_URL = "https://v3.football.api-sports.io"
 TG_URL = f"https://api.telegram.org/bot{TOKEN}"
@@ -16,30 +18,19 @@ TG_URL = f"https://api.telegram.org/bot{TOKEN}"
 HEADERS = {"x-apisports-key": API_KEY}
 
 STATE_FILE = "state.json"
-INTERVALO = 20
-
-# ================= LIGAS =================
-
-LIGAS_TOP = {
-    ("England", "Premier League"),
-    ("Spain", "La Liga"),
-    ("Italy", "Serie A"),
-    ("Germany", "Bundesliga"),
-    ("France", "Ligue 1"),
-    ("Brazil", "Serie A"),
-}
 
 # ================= STATE =================
 
 def default_state():
     return {
-        "modo": "SNIPER",
         "ativo": True,
+        "modo": "SNIPER",
+        "ligas": "MEDIO",
         "odd_min": 1.20,
         "minuto_max": 35,
-        "ligas": "MEDIO",
         "historico": [],
-        "pendente": None
+        "pendente": None,
+        "lucro_dia": 0.0
     }
 
 def load():
@@ -57,17 +48,15 @@ state = load()
 # ================= TELEGRAM =================
 
 def send(msg, buttons=None):
-    data = {
-        "chat_id": CHAT_ID,
-        "text": msg
-    }
+    data = {"chat_id": CHAT_ID, "text": msg}
 
     if buttons:
-        data["reply_markup"] = json.dumps({
-            "inline_keyboard": buttons
-        })
+        data["reply_markup"] = json.dumps({"inline_keyboard": buttons})
 
     requests.post(f"{TG_URL}/sendMessage", data=data)
+
+def answer_callback(cid):
+    requests.post(f"{TG_URL}/answerCallbackQuery", data={"callback_query_id": cid})
 
 last_update = 0
 
@@ -80,27 +69,27 @@ def updates():
         last_update = u["update_id"]
         yield u
 
-# ================= MENU =================
+# ================= PAINEL =================
 
 def painel():
     msg = (
-        "🚀 MENU DO BOT\n\n"
+        "🚀 BOT\n\n"
         f"Modo: {state['modo']}\n"
         f"Ativo: {state['ativo']}\n"
-        f"Odd min: {state['odd_min']}\n"
-        f"Minuto máx: {state['minuto_max']}\n"
-        f"Ligas: {state['ligas']}"
+        f"Odd: {state['odd_min']}\n"
+        f"Min: {state['minuto_max']}\n"
+        f"Ligas: {state['ligas']}\n\n"
+        f"💰 Lucro hoje: {state['lucro_dia']}"
     )
 
     buttons = [
-        [{"text": "📊 Painel", "callback_data": "status"}],
-        [{"text": "🟢 Ativar", "callback_data": "start"},
-         {"text": "🔴 Pausar", "callback_data": "stop"}],
+        [{"text": "🟢 Start", "callback_data": "start"},
+         {"text": "🔴 Stop", "callback_data": "stop"}],
         [{"text": "🎯 Sniper", "callback_data": "sniper"},
          {"text": "🚀 Volume", "callback_data": "volume"}],
         [{"text": "🌍 Ligas", "callback_data": "ligas"}],
         [{"text": "⚙️ Config", "callback_data": "config"}],
-        [{"text": "💰 Histórico", "callback_data": "historico"}],
+        [{"text": "📊 Histórico", "callback_data": "historico"}],
     ]
 
     send(msg, buttons)
@@ -130,25 +119,12 @@ def get_odd(fid):
 
 # ================= FILTRO =================
 
-def liga_ok(country, league):
-    if state["ligas"] == "OPEN":
-        return True
-    if state["ligas"] == "TOP":
-        return (country, league) in LIGAS_TOP
-    return True
-
 def valido(fx):
     m = fx["fixture"]["status"].get("elapsed") or 0
     g = (fx["goals"]["home"] or 0) + (fx["goals"]["away"] or 0)
-    country = fx["league"]["country"]
-    league = fx["league"]["name"]
-
-    if not liga_ok(country, league):
-        return False
 
     if m < 10 or m > state["minuto_max"]:
         return False
-
     if g > 1:
         return False
 
@@ -162,10 +138,8 @@ def alerta(j):
     msg = (
         f"🔥 SINAL\n\n"
         f"{j['home']} x {j['away']}\n"
-        f"{j['min']} min\n\n"
-        f"Over 0.5 HT\n"
-        f"Odd: {j['odd']}\n\n"
-        f"{link}"
+        f"{j['min']} min\n"
+        f"Odd: {j['odd']}"
     )
 
     buttons = [
@@ -181,96 +155,58 @@ def callbacks(data):
 
     if data == "start":
         state["ativo"] = True
-        save(state)
-        send("🟢 Bot ATIVADO")
+        send("🟢 ATIVADO")
 
     elif data == "stop":
         state["ativo"] = False
-        save(state)
-        send("🔴 Bot PAUSADO")
+        send("🔴 PAUSADO")
 
     elif data == "sniper":
         state["modo"] = "SNIPER"
-        save(state)
-        send("🎯 Modo SNIPER ativado")
+        send("🎯 SNIPER")
 
     elif data == "volume":
         state["modo"] = "VOLUME"
-        save(state)
-        send("🚀 Modo VOLUME ativado")
+        send("🚀 VOLUME")
 
     elif data == "ligas":
-        send("🌍 Escolha as ligas:", [
+        send("Escolha:", [
             [{"text": "TOP", "callback_data": "liga_top"}],
             [{"text": "MEDIO", "callback_data": "liga_medio"}],
-            [{"text": "OPEN", "callback_data": "liga_open"}],
+            [{"text": "OPEN", "callback_data": "liga_open"}]
         ])
 
     elif data == "liga_top":
         state["ligas"] = "TOP"
-        save(state)
-        send("🌍 Ligas: TOP")
+        send("TOP")
 
     elif data == "liga_medio":
         state["ligas"] = "MEDIO"
-        save(state)
-        send("🌍 Ligas: MEDIO")
+        send("MEDIO")
 
     elif data == "liga_open":
         state["ligas"] = "OPEN"
-        save(state)
-        send("🌍 Ligas: OPEN")
-
-    elif data == "config":
-        send("⚙️ Configuração:", [
-            [{"text": "Odd 1.20", "callback_data": "odd_120"},
-             {"text": "Odd 1.40", "callback_data": "odd_140"}],
-            [{"text": "Min 30", "callback_data": "min_30"},
-             {"text": "Min 45", "callback_data": "min_45"}],
-        ])
-
-    elif data == "odd_120":
-        state["odd_min"] = 1.20
-        save(state)
-        send("💸 Odd mínima: 1.20")
-
-    elif data == "odd_140":
-        state["odd_min"] = 1.40
-        save(state)
-        send("💸 Odd mínima: 1.40")
-
-    elif data == "min_30":
-        state["minuto_max"] = 30
-        save(state)
-        send("⏱ Minuto máximo: 30")
-
-    elif data == "min_45":
-        state["minuto_max"] = 45
-        save(state)
-        send("⏱ Minuto máximo: 45")
+        send("OPEN")
 
     elif data.startswith("bet"):
-        _, home, away, odd = data.split("|")
+        _, h, a, o = data.split("|")
 
         state["pendente"] = {
-            "home": home,
-            "away": away,
-            "odd": float(odd),
-            "status": "wait"
+            "home": h,
+            "away": a,
+            "odd": float(o),
+            "status": "esperando"
         }
 
-        save(state)
-        send("💰 Digite o valor da aposta")
-
-    elif data == "skip":
-        send("👍 Ignorado")
+        send("Digite valor")
 
     elif data == "historico":
-        total = len(state.get("historico", []))
-        send(f"📊 Total de apostas: {total}")
+        send(f"📊 Apostas: {len(state['historico'])}")
 
     elif data == "status":
         painel()
+
+    save(state)
 
 # ================= TEXTO =================
 
@@ -278,7 +214,7 @@ def texto(msg):
     if msg == "/painel":
         painel()
 
-    elif state.get("pendente") and state["pendente"]["status"] == "wait":
+    elif state["pendente"] and state["pendente"]["status"] == "esperando":
         try:
             v = float(msg)
             odd = state["pendente"]["odd"]
@@ -287,36 +223,55 @@ def texto(msg):
 
             state["pendente"]["valor"] = v
             state["pendente"]["lucro"] = lucro
+            state["pendente"]["status"] = "ativo"
+
             state["historico"].append(state["pendente"])
-            state["pendente"] = None
 
-            save(state)
+            send(f"💸 Lucro possível: {lucro}")
 
-            send(f"💸 Lucro: {lucro}")
         except:
             send("Valor inválido")
 
-# ================= LOOP =================
+# ================= RESULTADO AUTOMATICO =================
 
-import threading
+def verificar_resultado():
+    if not state["pendente"]:
+        return
+
+    j = state["pendente"]
+
+    data = api("/fixtures?live=all")
+
+    for fx in data.get("response", []):
+        if fx["teams"]["home"]["name"] == j["home"]:
+            gols = (fx["goals"]["home"] or 0) + (fx["goals"]["away"] or 0)
+
+            if gols >= 1:
+                lucro = j["lucro"]
+                state["lucro_dia"] += lucro
+
+                send(f"✅ WIN +{lucro}")
+                state["pendente"] = None
+                save(state)
+                return
+
+# ================= LOOPS =================
 
 def loop_telegram():
     while True:
         for u in updates():
+
             if "callback_query" in u:
                 cb = u["callback_query"]
-
-                answer_callback(cb["id"])  # 🔥 ESSENCIAL
-
+                answer_callback(cb["id"])
                 callbacks(cb["data"])
 
             if "message" in u:
-                if str(u["message"]["chat"]["id"]) != str(CHAT_ID):
+                if str(u["message"]["chat"]["id"]) != CHAT_ID:
                     continue
                 texto(u["message"].get("text",""))
 
-        time.sleep(1)  # ⚡ resposta rápida
-
+        time.sleep(0.2)
 
 def loop_jogos():
     while True:
@@ -327,9 +282,7 @@ def loop_jogos():
                 if not valido(fx):
                     continue
 
-                fid = fx["fixture"]["id"]
-                odd = get_odd(fid)
-
+                odd = get_odd(fx["fixture"]["id"])
                 if not odd:
                     continue
 
@@ -339,14 +292,15 @@ def loop_jogos():
                     "min": fx["fixture"]["status"]["elapsed"],
                     "odd": odd
                 })
-
                 break
 
-        time.sleep(INTERVALO)  # pode manter 20s aqui
+        verificar_resultado()
+        time.sleep(10)
 
+# ================= MAIN =================
 
 def main():
-    send("🤖 BOT INICIADO")
+    send("🤖 BOT ONLINE")
 
     t1 = threading.Thread(target=loop_telegram)
     t2 = threading.Thread(target=loop_jogos)
