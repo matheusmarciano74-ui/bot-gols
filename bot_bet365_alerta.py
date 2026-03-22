@@ -6,6 +6,8 @@ import requests
 import os
 from datetime import datetime, timedelta, timezone
 
+send_telegram_message("🚀 TESTE DIRETO - se chegou, Telegram tá OK")
+
 # =========================================================
 # CONFIG
 # =========================================================
