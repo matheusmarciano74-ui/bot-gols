@@ -257,19 +257,24 @@ def texto(msg):
 
 # ================= LOOP =================
 
-def main():
-    send("🤖 BOT INICIADO")
+import threading
 
+def loop_telegram():
     while True:
         for u in updates():
             if "callback_query" in u:
                 callbacks(u["callback_query"]["data"])
 
             if "message" in u:
-                if str(u["message"]["chat"]["id"]) != CHAT_ID:
+                if str(u["message"]["chat"]["id"]) != str(CHAT_ID):
                     continue
                 texto(u["message"].get("text",""))
 
+        time.sleep(1)  # ⚡ resposta rápida
+
+
+def loop_jogos():
+    while True:
         if state["ativo"]:
             jogos = api("/fixtures?live=all").get("response", [])
 
@@ -292,7 +297,20 @@ def main():
 
                 break
 
-        time.sleep(INTERVALO)
+        time.sleep(INTERVALO)  # pode manter 20s aqui
+
+
+def main():
+    send("🤖 BOT INICIADO")
+
+    t1 = threading.Thread(target=loop_telegram)
+    t2 = threading.Thread(target=loop_jogos)
+
+    t1.start()
+    t2.start()
+
+    t1.join()
+    t2.join()
 
 if __name__ == "__main__":
     main()
