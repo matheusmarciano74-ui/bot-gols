@@ -185,7 +185,8 @@ def callbacks(data):
     elif data == "sniper":
         state["modo"] = "SNIPER"
     elif data == "volume":
-        state["modo"] = "VOLUME"
+    state["modo"] = "VOLUME"
+    send("🚀 Modo VOLUME ativado")
 
     elif data == "ligas":
         send("🌍 Escolha:", [
